@@ -1,9 +1,11 @@
 """
 LLM Pass 1 — Sanitizer Evaluation.
 For taint paths with sanitizers, evaluate if sanitizers can be bypassed.
+All LLM calls run concurrently (up to CONCURRENCY_LIMIT at once).
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+import asyncio
 import structlog
 
 from app.taint.engine import TaintPath
@@ -11,6 +13,8 @@ from app.reasoning.llm_client import LLMClient
 from app.reasoning.budget import LLMBudget
 
 log = structlog.get_logger()
+
+CONCURRENCY_LIMIT = 5
 
 SYSTEM_PROMPT = """You are an elite security researcher specializing in source code vulnerability analysis.
 You think step-by-step, consider edge cases, and provide concrete proof-of-concept inputs.
@@ -48,19 +52,22 @@ class SanitizerEvaluationPass:
         self._budget = budget
 
     async def run(self, paths: list[TaintPath]) -> list[EvaluatedPath]:
-        results: list[EvaluatedPath] = []
-        for path in paths:
+        """Evaluate all paths. LLM calls run concurrently up to CONCURRENCY_LIMIT."""
+        results_map: dict[int, EvaluatedPath] = {}
+        llm_indices: list[int] = []
+
+        # First pass: resolve everything that doesn't need an LLM call
+        for i, path in enumerate(paths):
             if not path.sanitizers:
-                # No sanitizers — taint flows straight to sink, no bypass needed
-                results.append(EvaluatedPath(taint_path=path, bypass_possible=True, llm_confidence=0.95, skip_llm=True))
+                results_map[i] = EvaluatedPath(
+                    taint_path=path, bypass_possible=True, llm_confidence=0.95, skip_llm=True
+                )
                 continue
 
-            # If ALL sanitizers are already marked partial, we know they're bypassable —
-            # skip the LLM and pass straight to exploit feasibility.
             all_partial = all(s.is_partial for s in path.sanitizers)
             if all_partial:
                 bypass_note = "; ".join(s.description or s.pattern for s in path.sanitizers)
-                results.append(EvaluatedPath(
+                results_map[i] = EvaluatedPath(
                     taint_path=path,
                     sanitizer_effective=False,
                     bypass_possible=True,
@@ -68,24 +75,36 @@ class SanitizerEvaluationPass:
                     llm_confidence=0.75,
                     llm_reasoning=f"Sanitizer(s) flagged as incomplete by taint engine: {bypass_note}",
                     skip_llm=True,
-                ))
+                )
                 continue
 
-            # Budget check — skip LLM if exhausted
             if self._budget and not self._budget.try_consume():
                 log.warning("pass1.budget_exhausted", path_source=path.source.node.line)
-                results.append(EvaluatedPath(
+                results_map[i] = EvaluatedPath(
                     taint_path=path,
                     bypass_possible=True,
                     llm_confidence=path.confidence,
                     skip_llm=True,
                     llm_budget_exhausted=True,
-                ))
+                )
                 continue
 
-            evaluated = await self._evaluate_path(path)
-            results.append(evaluated)
-        return results
+            llm_indices.append(i)
+
+        # Second pass: run all LLM calls concurrently
+        if llm_indices:
+            semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+
+            async def _evaluate_one(idx: int) -> tuple[int, EvaluatedPath]:
+                async with semaphore:
+                    return idx, await self._evaluate_path(paths[idx])
+
+            log.info("pass1.concurrent", count=len(llm_indices))
+            llm_results = await asyncio.gather(*[_evaluate_one(i) for i in llm_indices])
+            for idx, result in llm_results:
+                results_map[idx] = result
+
+        return [results_map[i] for i in range(len(paths))]
 
     async def _evaluate_path(self, path: TaintPath) -> EvaluatedPath:
         code_snippets = "\n".join(

@@ -1,8 +1,13 @@
 """
 LLM client: Gemini (primary) → Ollama → Anthropic fallback chain.
 Gemini uses response_mime_type=application/json for guaranteed valid JSON.
+
+Optimizations:
+- Redis prompt-hash cache (1h TTL) — avoids re-calling LLM for identical prompts
+- 30-second Gemini timeout (down from 60) — fail fast, don't block the pipeline
 """
 from __future__ import annotations
+import hashlib
 import json
 from typing import Any
 
@@ -16,6 +21,9 @@ log = structlog.get_logger()
 GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 OLLAMA_MODEL = "llama3:latest"
+
+# Gemini HTTP timeout — fail fast rather than blocking the whole pipeline
+GEMINI_TIMEOUT = 30.0
 
 
 # Concrete example values for known schema field names.
@@ -40,6 +48,11 @@ _FIELD_EXAMPLES: dict[str, Any] = {
     "chain_steps": [],
     "component_ids": [],
     "severity_upgrade": "critical",
+    # Pass 3 batched response
+    "chains": [],
+    "component_indices": [0, 1],
+    "combined_severity": "high",
+    "analysis_summary": "No chains found.",
 }
 
 
@@ -47,6 +60,31 @@ class LLMClient:
     def __init__(self) -> None:
         self._total_tokens = 0
         self._total_calls = 0
+        self._cache_hits = 0
+
+    def _prompt_cache_key(self, system: str, user: str) -> str:
+        return hashlib.sha256(f"{system}\n\n{user}".encode()).hexdigest()
+
+    async def _get_cached(self, cache_key: str) -> dict[str, Any] | None:
+        try:
+            import redis.asyncio as aioredis
+            r = aioredis.from_url(settings.redis_url, decode_responses=True)
+            raw = await r.get(f"llm_cache:{cache_key}")
+            await r.aclose()
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
+        return None
+
+    async def _set_cached(self, cache_key: str, result: dict[str, Any]) -> None:
+        try:
+            import redis.asyncio as aioredis
+            r = aioredis.from_url(settings.redis_url, decode_responses=True)
+            await r.setex(f"llm_cache:{cache_key}", 3600, json.dumps(result))
+            await r.aclose()
+        except Exception:
+            pass
 
     def _validate_schema(self, result: dict[str, Any], schema: dict[str, Any]) -> list[str]:
         """Return list of missing required fields. Empty list means valid."""
@@ -54,15 +92,12 @@ class LLMClient:
         return [f for f in required if f not in result]
 
     def _build_example_prompt(self, schema: dict[str, Any]) -> str:
-        """Build a concrete filled-in JSON example from the schema for use in the prompt.
-        Shows the LLM what the OUTPUT should look like, not the schema definition."""
+        """Build a concrete filled-in JSON example from the schema for use in the prompt."""
         type_defaults: dict[str, Any] = {"boolean": True, "number": 0.85, "string": "...", "array": [], "object": {}}
         props = schema.get("properties", {})
         example: dict[str, Any] = {}
-        # Required fields first
         for field in schema.get("required", []):
             example[field] = _FIELD_EXAMPLES.get(field, type_defaults.get(props.get(field, {}).get("type", "string"), "..."))
-        # Optional fields
         for field, prop in props.items():
             if field not in example:
                 example[field] = _FIELD_EXAMPLES.get(field, type_defaults.get(prop.get("type", "string"), "..."))
@@ -70,16 +105,23 @@ class LLMClient:
 
     async def analyze(self, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
         """Call LLM with JSON output. Provider chain: Gemini → Ollama → Anthropic.
-        All providers receive a concrete example of the expected output (not the raw schema
-        definition) to prevent models from echoing the schema back."""
+        Checks Redis cache first — returns immediately on hit."""
         self._total_calls += 1
         required_fields = schema.get("required", [])
         example_json = self._build_example_prompt(schema)
-        # Append a concrete example to the user prompt so the model knows exactly what
-        # format to produce. This works for all providers including Gemini.
         full_user = (
             f"{user}\n\nRespond ONLY with valid JSON. Example format:\n{example_json}"
         )
+
+        # Cache lookup — skip LLM entirely if we've seen this exact prompt before
+        cache_key = self._prompt_cache_key(system, full_user)
+        cached = await self._get_cached(cache_key)
+        if cached is not None:
+            self._cache_hits += 1
+            log.debug("llm.cache_hit", cache_key=cache_key[:16])
+            return cached
+
+        result = None
 
         if settings.google_api_key:
             result = await self._call_gemini(system, full_user)
@@ -93,9 +135,11 @@ class LLMClient:
                     )
                     result = await self._call_gemini(system, retry_user)
                 if result is not None and not self._validate_schema(result, schema):
+                    await self._set_cached(cache_key, result)
                     return result
                 if result is not None:
                     result = self._fill_defaults(result, schema)
+                    await self._set_cached(cache_key, result)
                     return result
 
         if settings.ollama_base_url:
@@ -107,11 +151,15 @@ class LLMClient:
                         f"{full_user}\n\nYour response was missing: {missing}. Include ALL required fields."
                     )
                     result = await self._call_ollama(system, retry_user) or result
-                return self._fill_defaults(result, schema)
+                result = self._fill_defaults(result, schema)
+                await self._set_cached(cache_key, result)
+                return result
 
         if settings.anthropic_api_key:
             result = await self._call_anthropic(system, full_user)
-            return self._fill_defaults(result, schema)
+            result = self._fill_defaults(result, schema)
+            await self._set_cached(cache_key, result)
+            return result
 
         log.error("llm.no_provider")
         return {"error": "No LLM provider available"}
@@ -130,9 +178,7 @@ class LLMClient:
     async def _call_gemini(self, system: str, user: str) -> dict[str, Any] | None:
         """
         Call Gemini with response_mime_type=application/json.
-        We do NOT send response_schema — it causes Gemini to echo the schema definition
-        rather than produce values. Instead, a concrete example is embedded in the user
-        prompt (see _build_example_prompt).
+        30-second timeout — fail fast rather than blocking the pipeline.
         """
         url = f"{GEMINI_BASE}/{GEMINI_MODEL}:generateContent?key={settings.google_api_key}"
         payload = {
@@ -145,7 +191,7 @@ class LLMClient:
             },
         }
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -154,6 +200,9 @@ class LLMClient:
                 self._total_tokens += usage.get("totalTokenCount", len(content) // 4)
                 log.debug("llm.gemini_ok", tokens=usage.get("totalTokenCount", "?"))
                 return json.loads(content)
+        except httpx.TimeoutException:
+            log.warning("llm.gemini_timeout", timeout=GEMINI_TIMEOUT)
+            return None
         except httpx.HTTPStatusError as e:
             log.error("llm.gemini_http_error", status=e.response.status_code, body=e.response.text[:300])
             return None
@@ -196,7 +245,7 @@ class LLMClient:
             import anthropic
             client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
             response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6",
                 max_tokens=2048,
                 temperature=0.1,
                 system=system,
@@ -222,4 +271,8 @@ class LLMClient:
             return {"error": "JSON parse failed", "raw": content[:500]}
 
     def get_usage(self) -> dict[str, int]:
-        return {"total_tokens": self._total_tokens, "total_calls": self._total_calls}
+        return {
+            "total_tokens": self._total_tokens,
+            "total_calls": self._total_calls,
+            "cache_hits": self._cache_hits,
+        }

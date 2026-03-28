@@ -8,11 +8,16 @@ a higher-severity attack.
 Input: list of CorrelatedFinding (from fuser) with severity in {low, medium, info}
 Output: list of ChainFinding dataclasses
 
+Instead of one LLM call per finding-pair, this pass sends ALL candidates in a
+single batched prompt (max BATCH_SIZE findings per call) and asks the model to
+identify every chain in one shot. This reduces N*(N-1)/2 calls to ceil(N/BATCH_SIZE).
+
 The orchestrator creates Finding ORM objects from these and adds them to the DB.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-import itertools
+import asyncio
+import math
 import structlog
 
 from app.reasoning.llm_client import LLMClient
@@ -23,18 +28,14 @@ log = structlog.get_logger()
 
 # Only consider findings at or below this severity
 CHAIN_CANDIDATE_SEVERITIES = {"info", "low", "medium"}
-# Maximum group size to send to LLM at once
-MAX_GROUP_SIZE = 4
+# Maximum findings to include in a single LLM batch call
+BATCH_SIZE = 6
 # Minimum confidence for a chain finding to be accepted
 CHAIN_CONFIDENCE_THRESHOLD = 0.5
-# Maximum number of groups to send to LLM — keep this low to control cost.
-# Cross-class groups (different vuln_classes) are prioritized; same-class pairs
-# (e.g. log_injection + log_injection) are only included if budget remains.
-MAX_CHAIN_GROUPS = 3
 
 SYSTEM_PROMPT = """You are an expert penetration tester who specializes in finding complex, chained attack paths.
 
-You analyze multiple individually low-severity vulnerabilities and determine if they can be combined into a higher-severity attack chain.
+You analyze multiple individually low-severity vulnerabilities and determine if any can be combined into higher-severity attack chains.
 
 Your goal: find cases where exploiting finding A creates the conditions to exploit finding B, resulting in a combined impact greater than either finding alone.
 
@@ -47,44 +48,58 @@ Common chain patterns to look for:
 
 Respond ONLY with valid JSON. Be conservative — only report chains you are highly confident about."""
 
-SCHEMA = {
+# Schema for batched response: array of chains found across ALL findings
+BATCH_SCHEMA = {
     "type": "object",
     "properties": {
-        "chain_found": {"type": "boolean"},
-        "chain_description": {"type": "string", "description": "One-sentence description of the chain"},
-        "combined_severity": {"type": "string", "enum": ["critical", "high", "medium"]},
-        "confidence": {"type": "number", "description": "0.0-1.0"},
-        "attack_steps": {
+        "chains": {
             "type": "array",
+            "description": "All attack chains found. Empty array if none.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "order": {"type": "integer"},
-                    "action": {"type": "string"},
-                    "target": {"type": "string"},
-                    "finding_index": {"type": "integer", "description": "0-based index into the findings array"},
+                    "chain_description": {"type": "string", "description": "One-sentence description of the chain"},
+                    "combined_severity": {"type": "string", "enum": ["critical", "high", "medium"]},
+                    "confidence": {"type": "number", "description": "0.0-1.0"},
+                    "component_indices": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "0-based indices into the findings array for findings involved in this chain",
+                    },
+                    "attack_steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "order": {"type": "integer"},
+                                "action": {"type": "string"},
+                                "target": {"type": "string"},
+                                "finding_index": {"type": "integer"},
+                            },
+                            "required": ["order", "action", "target", "finding_index"],
+                        },
+                    },
+                    "payload_sequence": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step": {"type": "integer"},
+                                "method": {"type": "string"},
+                                "path": {"type": "string"},
+                                "payload": {"type": "string"},
+                                "purpose": {"type": "string"},
+                            },
+                            "required": ["step", "method", "path", "payload", "purpose"],
+                        },
+                    },
+                    "reasoning": {"type": "string"},
                 },
-                "required": ["order", "action", "target", "finding_index"],
+                "required": ["chain_description", "combined_severity", "confidence", "component_indices", "reasoning"],
             },
         },
-        "payload_sequence": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "step": {"type": "integer"},
-                    "method": {"type": "string"},
-                    "path": {"type": "string"},
-                    "payload": {"type": "string"},
-                    "purpose": {"type": "string"},
-                },
-                "required": ["step", "method", "path", "payload", "purpose"],
-            },
-        },
-        "reasoning": {"type": "string", "description": "Chain-of-thought explanation of how the chain works"},
-        "why_no_chain": {"type": "string", "description": "If chain_found is false, explain why not"},
     },
-    "required": ["chain_found", "confidence", "reasoning"],
+    "required": ["chains"],
 }
 
 
@@ -112,7 +127,7 @@ class ChainDiscoveryPass:
     async def run(self, correlated_findings: list[CorrelatedFinding]) -> list[ChainFinding]:
         """
         Entry point. Takes all correlated findings from the scan, filters to
-        chain candidates, groups them, and queries LLM for chains.
+        chain candidates, and sends them in batches to the LLM.
         """
         candidates = [
             f for f in correlated_findings
@@ -124,96 +139,37 @@ class ChainDiscoveryPass:
 
         log.info("pass3.start", candidate_count=len(candidates))
 
-        groups = self._group_findings(candidates)
-        log.debug("pass3.groups", count=len(groups))
+        # Split into batches of BATCH_SIZE
+        batches = [
+            candidates[i:i + BATCH_SIZE]
+            for i in range(0, len(candidates), BATCH_SIZE)
+        ]
 
         results: list[ChainFinding] = []
-        for group in groups:
+        for batch in batches:
             if self._budget and not self._budget.try_consume():
                 log.warning("pass3.budget_exhausted")
                 break
-            chain = await self._analyze_group(group)
-            if chain:
-                results.append(chain)
-                log.info(
-                    "pass3.chain_found",
-                    title=chain.title,
-                    severity=chain.combined_severity,
-                    confidence=chain.confidence,
-                )
+            chains = await self._analyze_batch(batch)
+            results.extend(chains)
+            if chains:
+                for c in chains:
+                    log.info(
+                        "pass3.chain_found",
+                        title=c.title,
+                        severity=c.combined_severity,
+                        confidence=c.confidence,
+                    )
 
         return results
 
-    def _group_findings(self, findings: list[CorrelatedFinding]) -> list[list[CorrelatedFinding]]:
-        """
-        Group findings that share context:
-          - same source file
-          - same sink file
-          - overlapping variable names in their taint paths
-        Returns a list of groups (each group is 2-4 findings).
-        """
-        groups: list[list[CorrelatedFinding]] = []
-        used = set()
-
-        # Index by file
-        by_file: dict[str, list[int]] = {}
-        for i, f in enumerate(findings):
-            path = f.confirmed.evaluated.taint_path
-            files = {path.source.node.file, path.sink.node.file}
-            for fn in files:
-                by_file.setdefault(fn, []).append(i)
-
-        # Build groups from file-collocated findings
-        seen_pairs: set[frozenset] = set()
-        for file_indices in by_file.values():
-            for combo in itertools.combinations(file_indices, 2):
-                pair = frozenset(combo)
-                if pair in seen_pairs:
-                    continue
-                seen_pairs.add(pair)
-                group = [findings[i] for i in combo]
-                groups.append(group)
-
-        # Also try groups of 3 for files with many findings
-        for file_indices in by_file.values():
-            if len(file_indices) >= 3:
-                for combo in itertools.combinations(file_indices[:MAX_GROUP_SIZE], 3):
-                    triple = frozenset(combo)
-                    if triple not in seen_pairs:
-                        seen_pairs.add(triple)
-                        group = [findings[i] for i in combo]
-                        groups.append(group)
-
-        # If no file-collocated groups found, try all pairs
-        if not groups and len(findings) >= 2:
-            for combo in itertools.combinations(range(len(findings)), 2):
-                group = [findings[i] for i in combo]
-                groups.append(group)
-
-        # ── Prioritize cross-class groups, cap at MAX_CHAIN_GROUPS ─────────────
-        # A group where findings have different vuln_classes is far more
-        # interesting than same-class pairs (e.g. log_inj + log_inj adds nothing).
-        # Score = number of distinct vuln_classes in the group (higher = better).
-        def _cross_class_score(group: list) -> int:
-            return len({cf.confirmed.evaluated.taint_path.vuln_class for cf in group})
-
-        cross_class = [g for g in groups if _cross_class_score(g) >= 2]
-        same_class  = [g for g in groups if _cross_class_score(g) < 2]
-
-        # Sort cross-class groups: most diverse first
-        cross_class.sort(key=_cross_class_score, reverse=True)
-
-        ranked = (cross_class + same_class)[:MAX_CHAIN_GROUPS]
-        log.debug("pass3.groups_ranked", total=len(groups), cross_class=len(cross_class), selected=len(ranked))
-        return ranked
-
-    async def _analyze_group(self, group: list[CorrelatedFinding]) -> ChainFinding | None:
-        """Send a group to the LLM and parse the chain response."""
+    async def _analyze_batch(self, batch: list[CorrelatedFinding]) -> list[ChainFinding]:
+        """Send a batch of findings to the LLM and parse all chains from the response."""
         finding_blocks = []
-        for i, cf in enumerate(group):
+        for i, cf in enumerate(batch):
             path = cf.confirmed.evaluated.taint_path
             block = (
-                f"Finding {i+1} (severity={cf.severity}, vuln_class={path.vuln_class}):\n"
+                f"Finding {i} (severity={cf.severity}, vuln_class={path.vuln_class}):\n"
                 f"  Source: {path.source.node.file}:{path.source.node.line}\n"
                 f"    Code: {path.source.node.code}\n"
                 f"  Sink: {path.sink.node.file}:{path.sink.node.line}\n"
@@ -226,57 +182,60 @@ class ChainDiscoveryPass:
                 block += f"  LLM note: {cf.confirmed.reasoning[:150]}\n"
             finding_blocks.append(block)
 
-        user_prompt = f"""Analyze these {len(group)} individually low/medium severity findings from the same codebase.
-Determine if they can be CHAINED into a higher-severity attack.
+        user_prompt = f"""Analyze these {len(batch)} individually low/medium severity findings from the same codebase.
+Identify ALL attack chains where one finding enables or amplifies another.
 
 {chr(10).join(finding_blocks)}
 
-Specifically consider:
-1. Can the output/side-effect of Finding 1 be used as input to trigger Finding 2?
-2. Do they share state (session, database, cache, filesystem) an attacker could abuse?
-3. Can a low-severity info leak (Finding 1) provide the data needed to exploit Finding 2?
-4. Can a race condition between paths be exploited?
-
-If chain_found is true, provide:
-- chain_description: one sentence describing the chain
-- combined_severity: the severity of the COMBINED attack ("critical", "high", or "medium")
-- attack_steps: ordered exploit steps referencing finding_index (0-based)
-- payload_sequence: the HTTP requests / inputs needed in order
+For each chain found:
+- chain_description: one sentence
+- combined_severity: severity of the COMBINED attack ("critical", "high", or "medium")
+- confidence: 0.0-1.0 (only include chains with confidence > 0.6)
+- component_indices: 0-based indices of findings involved
+- attack_steps: ordered exploit steps
+- payload_sequence: HTTP requests / inputs in order
 - reasoning: detailed explanation
 
-Be conservative. Only report chains you are highly confident about (confidence > 0.6)."""
+Return an empty "chains" array if no confident chains exist. Be conservative."""
 
-        result = await self._client.analyze(SYSTEM_PROMPT, user_prompt, SCHEMA)
+        result = await self._client.analyze(SYSTEM_PROMPT, user_prompt, BATCH_SCHEMA)
 
-        if not result.get("chain_found"):
-            return None
-        if result.get("confidence", 0) < CHAIN_CONFIDENCE_THRESHOLD:
-            return None
+        chains_data = result.get("chains", [])
+        if not isinstance(chains_data, list):
+            return []
 
-        severity = result.get("combined_severity", "medium")
-        description = result.get("chain_description", "Multi-step attack chain")
+        chain_findings: list[ChainFinding] = []
+        for chain_data in chains_data:
+            confidence = chain_data.get("confidence", 0)
+            if confidence < CHAIN_CONFIDENCE_THRESHOLD:
+                continue
 
-        # Build merged attack flow graph
-        merged_nodes, merged_edges = self._merge_attack_flows(group)
+            component_indices = chain_data.get("component_indices", [])
+            # Validate indices are in range
+            valid_indices = [i for i in component_indices if 0 <= i < len(batch)]
+            if len(valid_indices) < 2:
+                continue
 
-        # Compose title
-        vuln_classes = list({
-            cf.confirmed.evaluated.taint_path.vuln_class for cf in group
-        })
-        title = f"Attack Chain: {description[:80]}"
+            component_findings = [batch[i] for i in valid_indices]
+            description = chain_data.get("chain_description", "Multi-step attack chain")
+            severity = chain_data.get("combined_severity", "medium")
 
-        return ChainFinding(
-            title=title,
-            chain_description=description,
-            combined_severity=severity,
-            confidence=round(result.get("confidence", 0.7), 2),
-            component_findings=group,
-            attack_steps=result.get("attack_steps", []),
-            payload_sequence=result.get("payload_sequence", []),
-            reasoning=result.get("reasoning", ""),
-            merged_nodes=merged_nodes,
-            merged_edges=merged_edges,
-        )
+            merged_nodes, merged_edges = self._merge_attack_flows(component_findings)
+
+            chain_findings.append(ChainFinding(
+                title=f"Attack Chain: {description[:80]}",
+                chain_description=description,
+                combined_severity=severity,
+                confidence=round(confidence, 2),
+                component_findings=component_findings,
+                attack_steps=chain_data.get("attack_steps", []),
+                payload_sequence=chain_data.get("payload_sequence", []),
+                reasoning=chain_data.get("reasoning", ""),
+                merged_nodes=merged_nodes,
+                merged_edges=merged_edges,
+            ))
+
+        return chain_findings
 
     def _merge_attack_flows(
         self, group: list[CorrelatedFinding]
@@ -288,7 +247,6 @@ Be conservative. Only report chains you are highly confident about (confidence >
         """
         all_nodes: list[dict] = []
         all_edges: list[dict] = []
-        node_offset = 0
         prev_sink_id: str | None = None
 
         for i, cf in enumerate(group):
@@ -318,7 +276,6 @@ Be conservative. Only report chains you are highly confident about (confidence >
                         "edge_type": "taint",
                     })
 
-            # Add chain-link edge between this finding's sink and next finding's source
             sink_id = f"{prefix}node_{len(path.path) - 1}"
             if prev_sink_id is not None:
                 source_id = f"{prefix}node_0"
@@ -327,7 +284,7 @@ Be conservative. Only report chains you are highly confident about (confidence >
                     "target_id": source_id,
                     "label": "enables \u2192",
                     "taint_state": "chain",
-                    "edge_type": "chain",  # frontend uses this for dashed purple styling
+                    "edge_type": "chain",
                 })
             prev_sink_id = sink_id
 

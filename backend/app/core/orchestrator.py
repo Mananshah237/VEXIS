@@ -300,25 +300,41 @@ async def _run_scan_impl(scan_id: str) -> None:
                 poc_gen = PoCGenerator()
                 classifier = VulnClassifier()
 
+                # Pass 1 + Pass 2 run all LLM calls concurrently — broadcast
+                # before/after rather than per-path since they finish together.
+                await _broadcast(scan_id, "reasoning", 0.58, "Pass 1: evaluating sanitizers (concurrent)...")
                 evaluated = await pass1.run(taint_paths)
 
-                for j, ev in enumerate(evaluated):
-                    await _broadcast(
-                        scan_id, "reasoning",
-                        0.55 + 0.3 * (j + 1) / max(len(evaluated), 1),
-                        f"AI reasoning: path {j + 1}/{len(evaluated)}"
-                        + (" [taint-only]" if ev.llm_budget_exhausted else "")
-                    )
-
+                taint_only = sum(1 for ev in evaluated if ev.llm_budget_exhausted)
+                await _broadcast(
+                    scan_id, "reasoning", 0.72,
+                    f"Pass 2: confirming exploit feasibility ({len(evaluated)} paths"
+                    + (f", {taint_only} taint-only" if taint_only else "") + ")..."
+                )
                 confirmed = await pass2.run(evaluated)
                 correlated = deduplicate(fuser.fuse(confirmed))
 
-                # Pass 3: Chain discovery on medium/low findings
+                # Pass 3: Chain discovery on medium/low findings.
+                # Skip entirely if every finding is already HIGH or CRITICAL —
+                # there is nothing to upgrade via chaining.
                 from app.reasoning.pass_3_chains import ChainDiscoveryPass
                 from app.models.finding import Finding as FindingModel
 
-                chain_pass = ChainDiscoveryPass(budget=budget)
-                chain_findings = await chain_pass.run(correlated)
+                _all_high_or_critical = all(
+                    cf.severity in {"high", "critical"}
+                    for cf in correlated
+                    if not cf.is_false_positive
+                )
+                if _all_high_or_critical and correlated:
+                    log.info(
+                        "pass3.skipped",
+                        reason="all findings already high/critical",
+                        count=len(correlated),
+                    )
+                    chain_findings = []
+                else:
+                    chain_pass = ChainDiscoveryPass(budget=budget)
+                    chain_findings = await chain_pass.run(correlated)
 
                 await _broadcast(
                     scan_id, "reasoning", 0.88,
