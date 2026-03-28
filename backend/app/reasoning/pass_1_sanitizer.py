@@ -1,7 +1,12 @@
 """
 LLM Pass 1 — Sanitizer Evaluation.
 For taint paths with sanitizers, evaluate if sanitizers can be bypassed.
-All LLM calls run concurrently (up to CONCURRENCY_LIMIT at once).
+
+All LLM calls run concurrently (asyncio.gather + Semaphore(5)).
+
+For paths WITH full sanitizers, a combined Pass-1+2 prompt is used so the
+single LLM call asks both "is the sanitizer bypassable?" and "is it exploitable?"
+at the same time — halving the number of API calls for sanitized paths.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -21,17 +26,27 @@ You think step-by-step, consider edge cases, and provide concrete proof-of-conce
 You are skeptical — you only confirm a vulnerability when you can demonstrate a working exploit path.
 False positives damage your credibility, so you err on the side of "not exploitable" when uncertain."""
 
-SCHEMA = {
+# Used when path has a full sanitizer — combines bypass + exploitability into one call
+COMBINED_SCHEMA = {
     "type": "object",
     "properties": {
         "sanitizer_effective": {"type": "boolean", "description": "True if sanitizer completely prevents exploitation"},
         "bypass_possible": {"type": "boolean", "description": "True if attacker can bypass the sanitizer"},
         "bypass_technique": {"type": "string", "description": "Specific bypass method if possible"},
-        "confidence": {"type": "number", "description": "0.0-1.0 confidence that bypass works"},
-        "reasoning": {"type": "string", "description": "Step-by-step analysis"},
+        "exploitable": {"type": "boolean", "description": "True if the full path is exploitable end-to-end"},
+        "attack_vector": {"type": "string", "description": "Exact HTTP request or input vector"},
+        "payload": {"type": "string", "description": "Exact malicious string"},
+        "preconditions": {"type": "array", "items": {"type": "string"}},
+        "expected_outcome": {"type": "string"},
+        "why_not_exploitable": {"type": "string"},
+        "confidence": {"type": "number", "description": "0.0-1.0"},
+        "reasoning": {"type": "string"},
     },
-    "required": ["sanitizer_effective", "bypass_possible", "confidence", "reasoning"],
+    "required": ["sanitizer_effective", "bypass_possible", "exploitable", "confidence", "reasoning", "why_not_exploitable"],
 }
+
+# Kept for reference — no longer used directly; combined schema replaces both
+SCHEMA = COMBINED_SCHEMA
 
 
 @dataclass
@@ -42,8 +57,16 @@ class EvaluatedPath:
     bypass_technique: str = ""
     llm_confidence: float = 0.5
     llm_reasoning: str = ""
-    skip_llm: bool = False  # True if no sanitizers — skip to pass 2
-    llm_budget_exhausted: bool = False  # True if LLM call was skipped due to budget
+    skip_llm: bool = False       # True if no sanitizers — skip Pass 2 LLM
+    llm_budget_exhausted: bool = False
+    # Pass-1+2 combined fields (set when combined=True in _evaluate_path)
+    combined: bool = False       # True when Pass-2 data is already included
+    exploitable: bool | None = None
+    attack_vector: str = ""
+    payload: str = ""
+    preconditions: list[str] = field(default_factory=list)
+    expected_outcome: str = ""
+    why_not_exploitable: str = ""
 
 
 class SanitizerEvaluationPass:
@@ -52,15 +75,26 @@ class SanitizerEvaluationPass:
         self._budget = budget
 
     async def run(self, paths: list[TaintPath]) -> list[EvaluatedPath]:
-        """Evaluate all paths. LLM calls run concurrently up to CONCURRENCY_LIMIT."""
+        """
+        Evaluate all paths concurrently.
+
+        Fast-path (no LLM):
+          - No sanitizers → directly exploitable
+          - All sanitizers partial → bypass known, skip LLM
+
+        Slow-path (LLM, combined Pass-1+2):
+          - Full sanitizer present → one combined call answers bypass + exploitability
+        """
         results_map: dict[int, EvaluatedPath] = {}
         llm_indices: list[int] = []
 
-        # First pass: resolve everything that doesn't need an LLM call
         for i, path in enumerate(paths):
             if not path.sanitizers:
                 results_map[i] = EvaluatedPath(
-                    taint_path=path, bypass_possible=True, llm_confidence=0.95, skip_llm=True
+                    taint_path=path,
+                    bypass_possible=True,
+                    llm_confidence=0.95,
+                    skip_llm=True,
                 )
                 continue
 
@@ -91,7 +125,6 @@ class SanitizerEvaluationPass:
 
             llm_indices.append(i)
 
-        # Second pass: run all LLM calls concurrently
         if llm_indices:
             semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
@@ -107,6 +140,7 @@ class SanitizerEvaluationPass:
         return [results_map[i] for i in range(len(paths))]
 
     async def _evaluate_path(self, path: TaintPath) -> EvaluatedPath:
+        """Single combined LLM call: bypass analysis + exploit feasibility."""
         code_snippets = "\n".join(
             f"  Line {n.node.line}: {n.node.code}" for n in path.path
         )
@@ -116,7 +150,7 @@ class SanitizerEvaluationPass:
         )
         sink_type = path.vuln_class.upper()
 
-        user_prompt = f"""Evaluate whether the sanitizer(s) below actually prevent {sink_type} exploitation.
+        user_prompt = f"""Analyze this {sink_type} taint path in one step:
 
 SOURCE (attacker-controlled):
   File: {path.source.node.file}  Line {path.source.node.line}
@@ -132,12 +166,17 @@ SANITIZERS APPLIED:
 FULL DATA FLOW:
 {code_snippets}
 
-Answer these questions:
-1. Does each sanitizer completely neutralize the {sink_type} threat, or can it be bypassed?
-2. Provide a SPECIFIC bypass string (e.g., for SQLi: `' OR 1=1--`, for CMDi: `; id`, for path: `../../etc/passwd`).
-3. State your confidence (0.0–1.0) that a bypass exists."""
+Answer ALL of the following in one response:
+PART A — Sanitizer bypass:
+1. Can each sanitizer be bypassed for {sink_type}? (sanitizer_effective, bypass_possible, bypass_technique)
 
-        result = await self._client.analyze(SYSTEM_PROMPT, user_prompt, SCHEMA)
+PART B — Exploit feasibility (assume bypass from Part A if possible):
+2. Is the full path exploitable end-to-end? (exploitable)
+3. attack_vector: exact HTTP request or input (e.g. "GET /search?q=PAYLOAD")
+4. payload: exact malicious string (e.g. "' OR 1=1--")
+5. preconditions, expected_outcome, why_not_exploitable, confidence (0.0–1.0), reasoning"""
+
+        result = await self._client.analyze(SYSTEM_PROMPT, user_prompt, COMBINED_SCHEMA)
 
         return EvaluatedPath(
             taint_path=path,
@@ -146,4 +185,11 @@ Answer these questions:
             bypass_technique=result.get("bypass_technique", ""),
             llm_confidence=result.get("confidence", 0.5),
             llm_reasoning=result.get("reasoning", ""),
+            combined=True,
+            exploitable=result.get("exploitable", False),
+            attack_vector=result.get("attack_vector", ""),
+            payload=result.get("payload", ""),
+            preconditions=result.get("preconditions", []),
+            expected_outcome=result.get("expected_outcome", ""),
+            why_not_exploitable=result.get("why_not_exploitable", ""),
         )
