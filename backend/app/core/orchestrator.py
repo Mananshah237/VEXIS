@@ -125,10 +125,50 @@ async def _run_scan_impl(scan_id: str) -> None:
                 for f in Path(source_path).rglob(ext)
             )
 
+            # ── Vendored / minified / generated file exclusion ────────────────
+            # Normalise source_path to forward slashes for consistent matching
+            _src_prefix = source_path.replace("\\", "/").rstrip("/") + "/"
+            _excl_paths = [p.lower() for p in settings.excluded_path_patterns]
+            _excl_names = [n.lower() for n in settings.excluded_filename_patterns]
+
+            def _is_excluded(f: Path) -> str | None:
+                """Return exclusion reason string, or None if file should be kept."""
+                norm = f.as_posix().replace(_src_prefix, "/").lower()
+                for pat in _excl_paths:
+                    if pat in norm:
+                        return "vendor"
+                name = f.name.lower()
+                for pat in _excl_names:
+                    if name.endswith(pat):
+                        return "minified"
+                # Size check — minified files are typically one giant line
+                try:
+                    if f.stat().st_size > settings.max_file_bytes:
+                        return "oversized"
+                except OSError:
+                    pass
+                return None
+
+            excl_counts: dict[str, int] = {}
+            candidate_files: list[Path] = []
+            for f in all_py_files:
+                reason = _is_excluded(f)
+                if reason:
+                    excl_counts[reason] = excl_counts.get(reason, 0) + 1
+                else:
+                    candidate_files.append(f)
+
+            if excl_counts:
+                log.info(
+                    "scan.files_excluded",
+                    **excl_counts,
+                    total_skipped=sum(excl_counts.values()),
+                )
+
             # Large-file filtering: skip files over _MAX_FILE_LINES
             py_files = []
             skipped_large: list[str] = []
-            for f in all_py_files:
+            for f in candidate_files:
                 try:
                     line_count = sum(1 for _ in open(f, encoding="utf-8", errors="ignore"))
                     if line_count > _MAX_FILE_LINES:

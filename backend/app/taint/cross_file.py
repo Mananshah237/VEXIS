@@ -6,6 +6,11 @@ interprocedural DATA_DEP edges for three cross-file flow patterns:
   1. Shared-state stores/loads  — request.state.X, session["KEY"]
   2. Function arg -> parameter  — tainted arg in caller -> param uses in callee
   3. Return values              — tainted return in callee -> assignment at call site
+
+Third-party / vendored files are excluded at link time: if _resolve_callee
+resolves to a file that matches any exclusion pattern, the cross-file edge is
+not added.  This prevents taint from flowing into (and being reported inside)
+jquery.min.js, node_modules, vendor/, etc.
 """
 from __future__ import annotations
 import re
@@ -18,6 +23,20 @@ from app.ingestion.pdg_builder import PDG, PDGNode, EdgeType, NodeType
 from app.ingestion.call_graph import ProjectCallGraph
 
 log = structlog.get_logger()
+
+
+def _is_third_party_file(file_path: str) -> bool:
+    """Return True if the file path looks like a vendored / generated file."""
+    from app.config import settings
+    norm = file_path.replace("\\", "/").lower()
+    for pat in settings.excluded_path_patterns:
+        if pat.lower() in norm:
+            return True
+    name = norm.rsplit("/", 1)[-1]
+    for pat in settings.excluded_filename_patterns:
+        if name.endswith(pat.lower()):
+            return True
+    return False
 
 # ---------------------------------------------------------------------------
 # Regex helpers
@@ -65,6 +84,19 @@ class CrossFileLinker:
     ) -> PDG:
         if not pdgs:
             raise ValueError("No PDGs to link")
+
+        # Drop third-party PDGs before merging — they should never be in the
+        # project graph since the file filter already excluded them at parse time,
+        # but this is a belt-and-suspenders guard for edge cases.
+        filtered = {f: p for f, p in pdgs.items() if not _is_third_party_file(f)}
+        if len(filtered) < len(pdgs):
+            log.debug(
+                "cross_file.dropped_third_party",
+                dropped=len(pdgs) - len(filtered),
+            )
+        pdgs = filtered
+        if not pdgs:
+            raise ValueError("No application PDGs remaining after third-party filter")
 
         merged = self._merge(pdgs)
         all_nodes: list[PDGNode] = [merged.nodes[n]["data"] for n in merged.nodes]
@@ -255,14 +287,24 @@ class CrossFileLinker:
         func_name: str,
         call_graph: ProjectCallGraph,
     ) -> Optional[str]:
-        """Resolve a function name to the file that defines it."""
+        """Resolve a function name to the file that defines it.
+
+        Returns None if the resolved file is a vendored / third-party file —
+        taint should not cross the application / library boundary.
+        """
         # 1. Import resolution (explicit)
         via_import = call_graph.resolve_import(caller_file, func_name)
         if via_import:
+            if _is_third_party_file(via_import):
+                log.debug("cross_file.skip_third_party", file=via_import)
+                return None
             return via_import
         # 2. Any other file that defines this function name
         fd = call_graph.get_func_def_by_name(func_name)
         if fd and fd.file != caller_file:
+            if _is_third_party_file(fd.file):
+                log.debug("cross_file.skip_third_party", file=fd.file)
+                return None
             return fd.file
         return None
 

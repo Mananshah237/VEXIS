@@ -2,6 +2,45 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
 
+# ---------------------------------------------------------------------------
+# Default exclusion patterns for vendored / minified / generated files.
+# Paths are matched as substrings against the full file path (case-insensitive).
+# Filenames are matched against the basename only.
+# Override via VEXIS_EXCLUDED_PATH_PATTERNS / VEXIS_EXCLUDED_FILENAME_PATTERNS
+# env vars (comma-separated lists).
+# ---------------------------------------------------------------------------
+DEFAULT_EXCLUDED_PATH_PATTERNS: List[str] = [
+    "/node_modules/",
+    "/vendor/",
+    "/vendors/",
+    "/static/js/",
+    "/static/css/",
+    "/assets/js/",
+    "/assets/css/",
+    "/dist/",
+    "/build/",
+    "/.venv/",
+    "/venv/",
+    "/env/",
+    "/__pycache__/",
+    "/.git/",
+    "/bower_components/",
+    "/jspm_packages/",
+]
+
+DEFAULT_EXCLUDED_FILENAME_PATTERNS: List[str] = [
+    ".min.js",
+    ".min.css",
+    ".bundle.js",
+    ".chunk.js",
+    "-min.js",
+    ".packed.js",
+]
+
+# Files larger than this (in bytes) are skipped — minified/generated files are huge
+DEFAULT_MAX_FILE_BYTES: int = 200_000  # 200 KB
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -22,6 +61,11 @@ class Settings(BaseSettings):
     max_repo_size_mb: int = 500
     max_llm_calls_per_scan: int = 100
     scan_timeout_seconds: int = 600
+
+    # File exclusion — vendored / minified / generated files
+    excluded_path_patterns: List[str] = DEFAULT_EXCLUDED_PATH_PATTERNS
+    excluded_filename_patterns: List[str] = DEFAULT_EXCLUDED_FILENAME_PATTERNS
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
 
     # Logging
     log_level: str = "INFO"
