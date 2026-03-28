@@ -85,6 +85,7 @@ class FindingDetailResponse(BaseModel):
     llm_confidence: float | None
     taint_confidence: float | None
     remediation: dict[str, Any] | None
+    exploit_script: str | None = None
     triage_status: str
     created_at: datetime
 

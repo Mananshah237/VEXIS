@@ -36,6 +36,7 @@ class Finding(Base):
     taint_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     remediation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     chain_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # set for vuln_class="chain"
+    exploit_script: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     triage_status: Mapped[str] = mapped_column(String(30), default="open")
     triage_notes: Mapped[str | None] = mapped_column(Text, nullable=True)

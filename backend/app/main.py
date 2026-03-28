@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import scan, findings, reports, triage, stats, auth
+from app.api.routes import scan, findings, reports, triage, stats, auth, exploit, differential
 from app.api.ws import scan_ws
 from app.config import settings
 from app.database import engine, Base
@@ -50,6 +50,8 @@ app.include_router(triage.router, prefix="/api/v1", tags=["triage"])
 app.include_router(stats.router, prefix="/api/v1", tags=["stats"])
 app.include_router(scan_ws.router, tags=["websocket"])
 app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
+app.include_router(exploit.router, prefix="/api/v1", tags=["exploit"])
+app.include_router(differential.router, prefix="/api/v1", tags=["differential"])
 
 
 @app.get("/health")
