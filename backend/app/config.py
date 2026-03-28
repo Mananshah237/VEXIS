@@ -1,0 +1,51 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import List
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Database
+    database_url: str = "postgresql+asyncpg://vexis:vexis@localhost:5432/vexis"
+
+    # Redis
+    redis_url: str = "redis://localhost:6379"
+
+    # LLM providers
+    google_api_key: str = ""
+    anthropic_api_key: str = ""
+
+    # CORS
+    cors_origins: List[str] = ["http://localhost:3000", "http://localhost:3001"]
+
+    # Scan limits
+    max_repo_size_mb: int = 500
+    max_llm_calls_per_scan: int = 100
+    scan_timeout_seconds: int = 600
+
+    # Logging
+    log_level: str = "INFO"
+
+    # Optional: Ollama fallback
+    ollama_base_url: str = "http://localhost:11434"
+
+    # Optional: GitHub OAuth (Phase 2)
+    github_client_id: str = ""
+    github_client_secret: str = ""
+
+    # MinIO object storage
+    minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = "vexis"
+    minio_secret_key: str = ""  # Required in production — set MINIO_SECRET_KEY env var
+    minio_secure: bool = False
+
+    # Celery async scanning (opt-in; set VEXIS_USE_CELERY=true to enable)
+    use_celery: bool = False
+
+    # JWT / Auth — MUST be set via JWT_SECRET env var in production
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 60 * 24 * 7  # 7 days
+
+
+settings = Settings()
