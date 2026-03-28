@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Background: transparent -->
+
+  <!-- Neural circuit motif: connection nodes -->
+  <circle cx="12" cy="20" r="2.5" fill="#00E5FF" opacity="0.4"/>
+  <circle cx="52" cy="20" r="2.5" fill="#00E5FF" opacity="0.4"/>
+  <circle cx="8"  cy="44" r="2.5" fill="#00E5FF" opacity="0.3"/>
+  <circle cx="56" cy="44" r="2.5" fill="#00E5FF" opacity="0.3"/>
+  <circle cx="32" cy="56" r="2.5" fill="#00E5FF" opacity="0.5"/>
+
+  <!-- Circuit traces flowing into V -->
+  <line x1="12" y1="20" x2="20" y2="28" stroke="#00E5FF" stroke-width="1" stroke-opacity="0.35"/>
+  <line x1="52" y1="20" x2="44" y2="28" stroke="#00E5FF" stroke-width="1" stroke-opacity="0.35"/>
+  <line x1="8"  y1="44" x2="20" y2="40" stroke="#00E5FF" stroke-width="1" stroke-opacity="0.25"/>
+  <line x1="56" y1="44" x2="44" y2="40" stroke="#00E5FF" stroke-width="1" stroke-opacity="0.25"/>
+  <line x1="32" y1="56" x2="32" y2="46" stroke="#00E5FF" stroke-width="1" stroke-opacity="0.35"/>
+
+  <!-- Small junction dots on the V strokes -->
+  <circle cx="24" cy="30" r="1.5" fill="#00E5FF" opacity="0.6"/>
+  <circle cx="40" cy="30" r="1.5" fill="#00E5FF" opacity="0.6"/>
+  <circle cx="28" cy="38" r="1.5" fill="#00E5FF" opacity="0.7"/>
+  <circle cx="36" cy="38" r="1.5" fill="#00E5FF" opacity="0.7"/>
+
+  <!-- The "V" letterform — bold, sharp, geometric -->
+  <path
+    d="M10 12 L32 50 L54 12"
+    stroke="#00E5FF"
+    stroke-width="6"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    fill="none"
+  />
+
+  <!-- Inner highlight on the V for depth -->
+  <path
+    d="M14 12 L32 44 L50 12"
+    stroke="#00E5FF"
+    stroke-width="1.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-opacity="0.3"
+    fill="none"
+  />
+</svg>
