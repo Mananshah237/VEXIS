@@ -1,7 +1,8 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import useSWR from "swr";
+import { useState } from "react";
+import useSWR, { mutate as globalMutate } from "swr";
 import Link from "next/link";
 import { AttackFlowGraph } from "@/components/AttackFlowGraph";
 
@@ -10,12 +11,38 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json());
 export default function FindingDetailPage() {
   const { id, fid } = useParams<{ id: string; fid: string }>();
   const apiBase = process.env.NEXT_PUBLIC_API_URL;
+  const [generatingExploit, setGeneratingExploit] = useState(false);
+  const [exploitCopied, setExploitCopied] = useState(false);
 
-  const { data: finding } = useSWR(`${apiBase}/api/v1/finding/${fid}`, fetcher);
+  const { data: finding, mutate: mutateFinding } = useSWR(
+    `${apiBase}/api/v1/finding/${fid}`,
+    fetcher
+  );
 
   if (!finding) {
     return <div className="min-h-screen flex items-center justify-center text-text-muted">Loading...</div>;
   }
+
+  const isDiscoveryFinding = finding.taint_path?.type === "business_logic_discovery";
+
+  const handleGenerateExploit = async () => {
+    setGeneratingExploit(true);
+    try {
+      await fetch(`${apiBase}/api/v1/finding/${fid}/exploit/generate`, { method: "POST" });
+      await mutateFinding();
+    } catch {
+      // ignore
+    } finally {
+      setGeneratingExploit(false);
+    }
+  };
+
+  const handleCopyExploit = async () => {
+    if (!finding.exploit_script) return;
+    await navigator.clipboard.writeText(finding.exploit_script);
+    setExploitCopied(true);
+    setTimeout(() => setExploitCopied(false), 2000);
+  };
 
   const attackNodes = finding.attack_flow?.nodes ?? [];
   const attackEdges = finding.attack_flow?.edges ?? [];
@@ -28,7 +55,17 @@ export default function FindingDetailPage() {
             <Link href={`/scan/${id}`} className="text-text-muted text-sm hover:text-accent-primary">
               ← Back to scan
             </Link>
-            <h1 className="text-2xl font-display font-bold mt-2">{finding.title}</h1>
+            <div className="flex items-center gap-3 mt-2">
+              <h1 className="text-2xl font-display font-bold">{finding.title}</h1>
+              {isDiscoveryFinding && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-[#7C4DFF]/15 text-[#7C4DFF] border border-[#7C4DFF]/30 flex-shrink-0">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                  </svg>
+                  Discovered by AI
+                </span>
+              )}
+            </div>
             <p className="text-text-muted mt-1">{finding.description}</p>
           </div>
         </div>
@@ -186,6 +223,54 @@ export default function FindingDetailPage() {
               <pre className="mt-3 text-xs bg-bg-elevated p-3 rounded overflow-x-auto text-severity-safe font-code">
                 {finding.remediation.code_fix}
               </pre>
+            )}
+          </div>
+        )}
+
+        {/* Exploit Script */}
+        {finding.vuln_class !== "chain" && finding.taint_path?.type !== "business_logic_discovery" && (
+          <div className="bg-bg-secondary border border-severity-medium/30 rounded-lg p-6">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <h2 className="font-display font-semibold">Exploit Script</h2>
+                <span className="text-xs text-severity-medium bg-severity-medium/10 px-2 py-0.5 rounded font-semibold">
+                  ⚠ Authorized use only
+                </span>
+              </div>
+              {finding.exploit_script ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleCopyExploit}
+                    className="text-xs px-3 py-1.5 border border-border rounded-lg text-text-secondary hover:border-accent-primary hover:text-accent-primary transition-colors"
+                  >
+                    {exploitCopied ? "Copied!" : "Copy"}
+                  </button>
+                  <a
+                    href={`${apiBase}/api/v1/finding/${fid}/exploit`}
+                    download={`exploit_${fid.slice(0, 8)}.py`}
+                    className="text-xs px-3 py-1.5 border border-border rounded-lg text-text-secondary hover:border-accent-primary hover:text-accent-primary transition-colors"
+                  >
+                    Download .py
+                  </a>
+                </div>
+              ) : (
+                <button
+                  onClick={handleGenerateExploit}
+                  disabled={generatingExploit}
+                  className="text-xs px-3 py-1.5 border border-accent-primary/50 rounded-lg text-accent-primary hover:bg-accent-primary/10 transition-colors disabled:opacity-50"
+                >
+                  {generatingExploit ? "Generating..." : "Generate Exploit Script"}
+                </button>
+              )}
+            </div>
+            {finding.exploit_script ? (
+              <pre className="text-xs bg-bg-elevated p-4 rounded-lg overflow-x-auto text-[#A8FF78] font-code leading-relaxed max-h-96 overflow-y-auto">
+                {finding.exploit_script}
+              </pre>
+            ) : (
+              <p className="text-text-muted text-sm">
+                No exploit script generated yet. Click &quot;Generate Exploit Script&quot; to create a runnable PoC.
+              </p>
             )}
           </div>
         )}

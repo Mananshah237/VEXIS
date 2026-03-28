@@ -409,6 +409,133 @@ async def _run_scan_impl(scan_id: str) -> None:
                     except Exception as e:
                         log.warning("scan.chain_finding_save_error", error=str(e))
 
+            # Persist source_path in stats so the differential endpoint can re-use it
+            scan.stats = {**scan.stats, "source_path": source_path}
+            await db.commit()
+
+            # ── Concurrent post-pipeline passes ─────────────────────────────────
+            # Exploit script generation, Pass 4 business-logic discovery, and
+            # Semgrep differential all run concurrently after the core pipeline.
+            discovery_mode = (scan.config or {}).get("discovery_mode", False)
+
+            async def _generate_exploit_scripts_task():
+                from app.exploit.script_generator import ExploitScriptGenerator
+                gen = ExploitScriptGenerator()
+                target_findings = [
+                    f for f in all_findings
+                    if f.vuln_class not in ("chain",) and not getattr(f, "is_false_positive", False)
+                    and f.exploit_script is None
+                ]
+                async def _gen_one(f):
+                    try:
+                        poc = f.poc or {}
+                        script = await gen.generate(
+                            cwe_id=f.cwe_id,
+                            vuln_class=f.vuln_class,
+                            source_file=f.source_file,
+                            source_line=f.source_line,
+                            sink_file=f.sink_file,
+                            sink_line=f.sink_line,
+                            sink_code=f.sink_code or "",
+                            payload=poc.get("payload", ""),
+                            attack_vector=poc.get("attack_vector", ""),
+                        )
+                        f.exploit_script = script.code
+                    except Exception as eg_err:
+                        log.warning("exploit_gen.failed", finding_id=str(f.id), error=str(eg_err))
+                await asyncio.gather(*[_gen_one(f) for f in target_findings], return_exceptions=True)
+                return len(target_findings)
+
+            async def _run_discovery_task():
+                if not discovery_mode:
+                    return []
+                from app.reasoning.pass_4_discovery import BusinessLogicDiscoveryPass
+                disc = BusinessLogicDiscoveryPass(budget=budget)
+                return await disc.run(parsed_files, source_path)
+
+            async def _run_semgrep_task():
+                from app.analysis.semgrep_runner import run_semgrep, compute_differential
+                sg_findings = await run_semgrep(source_path)
+                return compute_differential(all_findings, sg_findings)
+
+            await _broadcast(scan_id, "reasoning", 0.91,
+                             "Generating exploits, running discovery and Semgrep analysis...")
+
+            post_results = await asyncio.gather(
+                _generate_exploit_scripts_task(),
+                _run_discovery_task(),
+                _run_semgrep_task(),
+                return_exceptions=True,
+            )
+
+            # Unpack results — each may be an exception if it failed
+            exploit_count = post_results[0] if not isinstance(post_results[0], BaseException) else 0
+            discovery_results = post_results[1] if not isinstance(post_results[1], BaseException) else []
+            semgrep_diff = post_results[2] if not isinstance(post_results[2], BaseException) else None
+
+            if isinstance(post_results[0], BaseException):
+                log.warning("exploit_gen.task_failed", error=str(post_results[0]))
+            if isinstance(post_results[1], BaseException):
+                log.warning("pass4.task_failed", error=str(post_results[1]))
+            if isinstance(post_results[2], BaseException):
+                log.warning("semgrep.task_failed", error=str(post_results[2]))
+
+            # Save discovery findings to DB
+            discovery_saved = 0
+            if discovery_results:
+                for df in discovery_results:
+                    try:
+                        disc_orm = FindingModel(
+                            id=uuid.uuid4(),
+                            scan_id=scan.id,
+                            title=df.title,
+                            severity=df.severity,
+                            confidence=df.confidence,
+                            vuln_class=df.vuln_type,
+                            cwe_id=df.cwe_id,
+                            owasp_category=df.owasp_category,
+                            description=df.description + (f"\n\nAttack scenario: {df.attack_scenario}" if df.attack_scenario else ""),
+                            source_file=df.file,
+                            source_line=df.line,
+                            source_code=df.code_snippet or None,
+                            sink_file=df.file,
+                            sink_line=df.line,
+                            sink_code=df.code_snippet or None,
+                            taint_path={"type": "business_logic_discovery", "function": df.function_name},
+                            attack_flow={"nodes": [], "edges": [], "type": "business_logic_discovery"},
+                            llm_reasoning=df.attack_scenario,
+                            llm_confidence=df.confidence,
+                            remediation={"summary": df.remediation} if df.remediation else None,
+                            triage_status="open",
+                        )
+                        db.add(disc_orm)
+                        all_findings.append(disc_orm)
+                        discovery_saved += 1
+                    except Exception as e:
+                        log.warning("pass4.save_error", error=str(e))
+                if discovery_saved:
+                    await db.commit()
+
+            # Store Semgrep differential summary in scan stats
+            if semgrep_diff is not None:
+                diff_summary = {
+                    "semgrep_available": semgrep_diff.semgrep_available,
+                    "vexis_total": semgrep_diff.vexis_total,
+                    "semgrep_total": semgrep_diff.semgrep_total,
+                    "vexis_only": len(semgrep_diff.vexis_only),
+                    "semgrep_only": len(semgrep_diff.semgrep_only),
+                    "overlap": len(semgrep_diff.overlap),
+                }
+                scan.stats = {**scan.stats, "semgrep_summary": diff_summary}
+
+            log.info(
+                "post_pipeline.done",
+                exploit_scripts=exploit_count,
+                discovery_findings=discovery_saved,
+                semgrep_overlap=getattr(semgrep_diff, "overlap", None) and len(semgrep_diff.overlap),
+            )
+            await db.commit()
+
             # Second-order injection analysis (experimental — scans for DB write→read→sink patterns)
             try:
                 from app.analysis.second_order import analyze_second_order
@@ -512,6 +639,8 @@ async def _run_scan_impl(scan_id: str) -> None:
                 **scan.stats,
                 "llm_calls": budget.calls_made,
                 "taint_only_findings": taint_only_count,
+                "discovery_findings": discovery_saved,
+                "exploit_scripts_generated": exploit_count if not isinstance(exploit_count, BaseException) else 0,
             }
             await db.commit()
             await _update_status(db, scan, ScanStatus.COMPLETE)

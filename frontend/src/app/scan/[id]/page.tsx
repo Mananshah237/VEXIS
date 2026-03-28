@@ -1,6 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
+import { useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { ScanProgress } from "@/components/ScanProgress";
@@ -41,6 +42,7 @@ export default function ScanResultsPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const apiBase = process.env.NEXT_PUBLIC_API_URL;
+  const [activeTab, setActiveTab] = useState<"findings" | "semgrep">("findings");
 
   const { data: scan, mutate: mutateScan } = useSWR(
     `${apiBase}/api/v1/scan/${id}`,
@@ -49,6 +51,12 @@ export default function ScanResultsPage() {
   );
   const { data: findingsData } = useSWR(
     scan?.status === "complete" ? `${apiBase}/api/v1/scan/${id}/findings` : null,
+    fetcher
+  );
+  const { data: diffData, isLoading: diffLoading } = useSWR(
+    activeTab === "semgrep" && scan?.status === "complete"
+      ? `${apiBase}/api/v1/scan/${id}/differential`
+      : null,
     fetcher
   );
 
@@ -230,37 +238,200 @@ export default function ScanResultsPage() {
           </div>
         )}
 
-        {/* Findings list */}
-        {sortedFindings.length > 0 && (
-          <div className="space-y-2">
-            {sortedFindings.map((f: any) => (
-              <Link
-                key={f.id}
-                href={`/scan/${id}/finding/${f.id}`}
-                className="flex items-start justify-between p-4 bg-bg-secondary border border-border rounded-xl hover:border-accent-primary transition-colors group"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-3 mb-1">
-                    <span className={`font-bold uppercase text-xs ${SEV_COLORS[f.severity] ?? ""}`}>
-                      {f.severity}
-                    </span>
-                    <span className="font-code text-xs text-text-muted">{f.cwe_id}</span>
-                    <span className="font-code text-xs text-text-muted">
-                      {Math.round((f.confidence ?? 0) * 100)}% confidence
-                    </span>
-                  </div>
-                  <p className="font-semibold text-sm text-text-primary">{f.title}</p>
-                  <p className="text-xs text-text-muted mt-1 font-code">
-                    {f.source_file?.split("/").pop()}:{f.source_line}
-                    <span className="mx-1.5 text-text-muted">→</span>
-                    {f.sink_file?.split("/").pop()}:{f.sink_line}
-                  </p>
-                </div>
-                <span className="text-text-muted text-sm ml-4 group-hover:text-accent-primary flex-shrink-0">
-                  →
+        {/* Tabs */}
+        {!isRunning && scan?.status === "complete" && (
+          <div className="flex gap-1 mb-4 border-b border-border">
+            <button
+              onClick={() => setActiveTab("findings")}
+              className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                activeTab === "findings"
+                  ? "border-accent-primary text-accent-primary"
+                  : "border-transparent text-text-muted hover:text-text-secondary"
+              }`}
+            >
+              Findings{totalFindings > 0 ? ` (${totalFindings})` : ""}
+            </button>
+            <button
+              onClick={() => setActiveTab("semgrep")}
+              className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px flex items-center gap-1.5 ${
+                activeTab === "semgrep"
+                  ? "border-accent-primary text-accent-primary"
+                  : "border-transparent text-text-muted hover:text-text-secondary"
+              }`}
+            >
+              <span>VEXIS vs Semgrep</span>
+              {scan.stats?.semgrep_summary && (
+                <span className="text-xs bg-accent-primary/15 text-accent-primary px-1.5 py-0.5 rounded-full">
+                  {scan.stats.semgrep_summary.vexis_only}↑
                 </span>
-              </Link>
-            ))}
+              )}
+            </button>
+          </div>
+        )}
+
+        {/* Findings list */}
+        {activeTab === "findings" && sortedFindings.length > 0 && (
+          <div className="space-y-2">
+            {sortedFindings.map((f: any) => {
+              const isDiscovery = f.taint_path?.type === "business_logic_discovery";
+              return (
+                <Link
+                  key={f.id}
+                  href={`/scan/${id}/finding/${f.id}`}
+                  className={`flex items-start justify-between p-4 bg-bg-secondary border rounded-xl hover:border-accent-primary transition-colors group ${
+                    isDiscovery ? "border-[#7C4DFF]/30" : "border-border"
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-3 mb-1 flex-wrap">
+                      <span className={`font-bold uppercase text-xs ${SEV_COLORS[f.severity] ?? ""}`}>
+                        {f.severity}
+                      </span>
+                      <span className="font-code text-xs text-text-muted">{f.cwe_id}</span>
+                      <span className="font-code text-xs text-text-muted">
+                        {Math.round((f.confidence ?? 0) * 100)}% confidence
+                      </span>
+                      {isDiscovery && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold bg-[#7C4DFF]/15 text-[#7C4DFF] border border-[#7C4DFF]/30">
+                          ✦ Discovered by AI
+                        </span>
+                      )}
+                    </div>
+                    <p className="font-semibold text-sm text-text-primary">{f.title}</p>
+                    <p className="text-xs text-text-muted mt-1 font-code">
+                      {f.source_file?.split("/").pop()}:{f.source_line}
+                      <span className="mx-1.5 text-text-muted">→</span>
+                      {f.sink_file?.split("/").pop()}:{f.sink_line}
+                    </p>
+                  </div>
+                  <span className="text-text-muted text-sm ml-4 group-hover:text-accent-primary flex-shrink-0">
+                    →
+                  </span>
+                </Link>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Semgrep differential tab */}
+        {activeTab === "semgrep" && (
+          <div>
+            {diffLoading && (
+              <div className="text-center py-8 text-text-muted text-sm">Running Semgrep analysis...</div>
+            )}
+            {diffData && !diffLoading && (
+              <div className="space-y-4">
+                {!diffData.semgrep_available && (
+                  <div className="bg-bg-secondary border border-severity-medium/30 rounded-xl p-4 text-sm text-severity-medium">
+                    {diffData.semgrep_error ?? "Semgrep is not available for this scan."}
+                  </div>
+                )}
+                {/* Summary bar */}
+                {diffData.summary && (
+                  <div className="grid grid-cols-3 gap-3">
+                    {[
+                      { label: "VEXIS Only", value: diffData.summary.vexis_only, color: "text-accent-primary", desc: "Found by VEXIS, missed by Semgrep" },
+                      { label: "Overlap", value: diffData.summary.overlap, color: "text-severity-safe", desc: "Both tools found these" },
+                      { label: "Semgrep Only", value: diffData.summary.semgrep_only, color: "text-severity-medium", desc: "Found by Semgrep, missed by VEXIS" },
+                    ].map(({ label, value, color, desc }) => (
+                      <div key={label} className="bg-bg-secondary border border-border rounded-xl p-4 text-center">
+                        <p className={`text-3xl font-bold font-code ${color}`}>{value}</p>
+                        <p className="text-text-secondary font-semibold text-sm mt-1">{label}</p>
+                        <p className="text-text-muted text-xs mt-0.5">{desc}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* VEXIS-only findings */}
+                {diffData.vexis_only?.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-secondary mb-2 flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-accent-primary inline-block" />
+                      VEXIS-Only Findings
+                      <span className="text-text-muted font-normal">({diffData.vexis_only.length}) — deeper taint analysis found these</span>
+                    </h3>
+                    <div className="space-y-2">
+                      {diffData.vexis_only.map((f: any, i: number) => (
+                        <div key={i} className="bg-bg-secondary border border-accent-primary/20 rounded-lg p-3 text-sm">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className={`font-bold uppercase text-xs ${SEV_COLORS[f.severity] ?? ""}`}>{f.severity}</span>
+                            <span className="font-code text-xs text-text-muted">{f.vuln_class}</span>
+                          </div>
+                          <p className="font-semibold text-text-primary">{f.title}</p>
+                          <p className="font-code text-xs text-text-muted mt-1">
+                            {f.file?.split("/").pop()}:{f.line}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Semgrep-only findings */}
+                {diffData.semgrep_only?.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-secondary mb-2 flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-severity-medium inline-block" />
+                      Semgrep-Only Findings
+                      <span className="text-text-muted font-normal">({diffData.semgrep_only.length}) — consider adding taint sources/sinks</span>
+                    </h3>
+                    <div className="space-y-2">
+                      {diffData.semgrep_only.map((f: any, i: number) => (
+                        <div key={i} className="bg-bg-secondary border border-severity-medium/20 rounded-lg p-3 text-sm">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className={`font-bold uppercase text-xs ${SEV_COLORS[f.severity] ?? SEV_COLORS.medium}`}>{f.severity}</span>
+                            <span className="font-code text-xs text-text-muted">{f.rule_id?.split(".").pop()}</span>
+                            {f.cwe && <span className="font-code text-xs text-text-muted">{f.cwe}</span>}
+                          </div>
+                          <p className="text-text-secondary">{f.message}</p>
+                          <p className="font-code text-xs text-text-muted mt-1">
+                            {f.file?.split("/").pop()}:{f.line}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Overlap */}
+                {diffData.overlap?.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-secondary mb-2 flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-severity-safe inline-block" />
+                      Confirmed by Both Tools
+                      <span className="text-text-muted font-normal">({diffData.overlap.length})</span>
+                    </h3>
+                    <div className="space-y-2">
+                      {diffData.overlap.map((o: any, i: number) => (
+                        <div key={i} className="bg-bg-secondary border border-severity-safe/20 rounded-lg p-3 text-sm">
+                          <div className="flex items-center justify-between gap-4">
+                            <div>
+                              <p className="font-semibold text-text-primary">{o.vexis?.title}</p>
+                              <p className="font-code text-xs text-text-muted mt-0.5">
+                                VEXIS: {o.vexis?.file?.split("/").pop()}:{o.vexis?.line}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="font-code text-xs text-severity-medium">{o.semgrep?.rule_id?.split(".").pop()}</p>
+                              <p className="font-code text-xs text-text-muted">
+                                Semgrep: {o.semgrep?.file?.split("/").pop()}:{o.semgrep?.line}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {diffData.summary?.vexis_total === 0 && diffData.summary?.semgrep_total === 0 && (
+                  <div className="text-center py-8 text-text-muted text-sm">
+                    No findings from either tool to compare.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
