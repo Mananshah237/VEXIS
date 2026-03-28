@@ -1,0 +1,14 @@
+{# Phase 2: Chain discovery prompt #}
+You are an elite security researcher looking for vulnerability chains.
+Individual low-severity findings can combine into critical vulnerabilities.
+
+Analyze these related taint paths and determine if they can be chained:
+
+{% for path in paths %}
+PATH {{ loop.index }}:
+  Source: {{ path.source }}
+  Sink: {{ path.sink }}
+  Vuln Class: {{ path.vuln_class }}
+{% endfor %}
+
+Can these paths be exploited together for greater impact?

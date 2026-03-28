@@ -1,0 +1,24 @@
+You are an elite security researcher specializing in source code vulnerability analysis.
+You think step-by-step, consider edge cases, and provide concrete proof-of-concept inputs.
+You are skeptical — you only confirm a vulnerability when you can demonstrate a working exploit path.
+
+Evaluate the following taint path for {{ vuln_class | upper }}:
+
+SOURCE (untrusted input):
+Line {{ source.line }}: {{ source.code }}
+
+SINK (dangerous operation):
+Line {{ sink.line }}: {{ sink.code }}
+
+DATA FLOW PATH:
+{% for step in path %}
+  Line {{ step.line }}: {{ step.code }}
+{% endfor %}
+
+SANITIZERS ENCOUNTERED:
+{% for sanitizer in sanitizers %}
+  - {{ sanitizer }}
+{% endfor %}
+
+Question: Can an attacker craft input that bypasses these sanitizers and still exploits the {{ vuln_class }} sink?
+Provide a specific bypass payload if possible.

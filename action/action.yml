@@ -1,0 +1,53 @@
+name: "VEXIS Security Scan"
+description: "AI-powered vulnerability scanning with cross-file taint analysis and LLM-powered exploit reasoning"
+
+inputs:
+  api-url:
+    description: "VEXIS API URL (e.g. https://vexis-api.railway.app)"
+    required: true
+  api-key:
+    description: "VEXIS API key (generate at /settings)"
+    required: true
+  severity-threshold:
+    description: "Fail the check if any finding meets or exceeds this severity (critical, high, medium, low)"
+    required: false
+    default: "high"
+  scan-path:
+    description: "Path to scan relative to repo root (default: entire repo)"
+    required: false
+    default: "."
+  languages:
+    description: "Comma-separated languages to scan (python, javascript)"
+    required: false
+    default: "python,javascript"
+  timeout:
+    description: "Maximum seconds to wait for scan completion"
+    required: false
+    default: "300"
+
+outputs:
+  scan-id:
+    description: "The VEXIS scan ID"
+  findings-count:
+    description: "Total number of findings"
+  critical-count:
+    description: "Number of critical findings"
+  high-count:
+    description: "Number of high findings"
+  report-url:
+    description: "URL to the full scan report"
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    VEXIS_API_URL: ${{ inputs.api-url }}
+    VEXIS_API_KEY: ${{ inputs.api-key }}
+    VEXIS_SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+    VEXIS_SCAN_PATH: ${{ inputs.scan-path }}
+    VEXIS_LANGUAGES: ${{ inputs.languages }}
+    VEXIS_TIMEOUT: ${{ inputs.timeout }}
+
+branding:
+  icon: "shield"
+  color: "red"

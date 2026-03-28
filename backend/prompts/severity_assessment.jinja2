@@ -1,0 +1,16 @@
+Assess the severity of this {{ vuln_class | upper }} vulnerability:
+
+Title: {{ title }}
+Description: {{ description }}
+
+Source: {{ source_file }}:{{ source_line }}
+Sink: {{ sink_file }}:{{ sink_line }}
+
+Attack Vector: {{ attack_vector }}
+Payload: {{ payload }}
+Expected Outcome: {{ expected_outcome }}
+
+Rate the severity from CRITICAL/HIGH/MEDIUM/LOW/INFO based on:
+- Exploitability (attack complexity, auth required, network access)
+- Impact (confidentiality, integrity, availability)
+- Confidence in exploitability

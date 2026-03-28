@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install deps
+        working-directory: backend
+        run: uv sync --dev
+
+      - name: ruff check
+        working-directory: backend
+        run: uv run ruff check app/
+
+      - name: ruff format check
+        working-directory: backend
+        run: uv run ruff format --check app/
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vexis
+          POSTGRES_PASSWORD: vexis
+          POSTGRES_DB: vexis_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install deps
+        working-directory: backend
+        run: uv sync --dev
+
+      - name: Run taint engine unit tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://vexis:vexis@localhost:5432/vexis_test
+          GOOGLE_API_KEY: placeholder-not-used-in-unit-tests
+        run: uv run pytest tests/test_taint_engine.py -v
+
+      - name: Run API unit tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://vexis:vexis@localhost:5432/vexis_test
+          GOOGLE_API_KEY: placeholder-not-used-in-unit-tests
+        run: uv run pytest tests/test_api.py -v
+
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+        run: npm run build

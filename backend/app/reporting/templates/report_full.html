@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  @page {
+    size: A4;
+    margin: 18mm 15mm 18mm 15mm;
+    @bottom-center {
+      content: "VEXIS Security Report  ·  Confidential  ·  Page " counter(page) " of " counter(pages);
+      font-family: monospace; font-size: 8pt; color: #888;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+    font-size: 10pt; color: #1a1a2e; background: #fff; line-height: 1.55;
+  }
+  .page-break { page-break-after: always; }
+  h1 { font-size: 26pt; font-weight: 800; color: #0a0a18; }
+  h2 { font-size: 15pt; font-weight: 700; margin: 20px 0 10px; color: #0a0a18; border-bottom: 2px solid #e8e8f0; padding-bottom: 4px; }
+  h3 { font-size: 11pt; font-weight: 600; margin: 14px 0 6px; color: #1a1a2e; }
+  p  { margin-bottom: 8px; }
+  code, .mono { font-family: "Consolas","Courier New",monospace; font-size: 8.5pt; background: #f4f4f8; padding: 1px 4px; border-radius: 3px; }
+  pre {
+    font-family: "Consolas","Courier New",monospace; font-size: 8pt;
+    background: #0d0d1e; color: #e2e8f0; padding: 12px; border-radius: 6px;
+    white-space: pre-wrap; word-break: break-all; margin: 8px 0;
+    border-left: 3px solid #00d9ff;
+  }
+  pre .vuln { background: rgba(255,45,85,0.35); border-radius: 2px; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 9pt; }
+  th { background: #1a1a2e; color: #e2e8f0; padding: 7px 10px; text-align: left; font-size: 8.5pt; font-weight: 600; }
+  td { padding: 6px 10px; border-bottom: 1px solid #e8e8f0; }
+  tr:nth-child(even) td { background: #f8f8fc; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:8pt; font-weight:700; letter-spacing:.05em; text-transform:uppercase; }
+  .badge-critical { background:#ff2d55; color:#fff; }
+  .badge-high     { background:#ff6b35; color:#fff; }
+  .badge-medium   { background:#ffd60a; color:#1a1a2e; }
+  .badge-low      { background:#34c759; color:#fff; }
+  .badge-info     { background:#636366; color:#fff; }
+  .callout { border-left:4px solid #00d9ff; background:#f0faff; padding:10px 14px; border-radius:0 6px 6px 0; margin:12px 0; }
+  .callout-warn  { border-left-color:#ff6b35; background:#fff5f0; }
+  .callout-chain { border-left-color:#7c3aed; background:#f5f0ff; }
+  a { color:#0070f3; }
+  hr { border:none; border-top:2px solid #e8e8f0; margin:16px 0; }
+
+  /* Cover page */
+  .cover { padding: 60px 0 40px; }
+  .cover-logo { font-family: monospace; font-size: 36pt; font-weight: 900; color: #00d9ff; letter-spacing: -2px; }
+  .cover-tagline { font-size: 12pt; color: #555; margin-top: 4px; }
+  .cover-meta { margin-top: 40px; font-size: 10pt; color: #444; }
+  .cover-meta td { border: none; padding: 4px 0; }
+  .risk-gauge { display: inline-block; font-size: 48pt; font-weight: 900; margin: 20px 0 4px; }
+  .risk-label { font-size: 11pt; color: #888; }
+
+  /* Taint path */
+  .taint-step { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0; }
+  .taint-node {
+    background: #1a1a2e; color: #e2e8f0; font-family: monospace; font-size: 8pt;
+    padding: 6px 10px; border-radius: 6px; flex: 1;
+  }
+  .taint-arrow { color: #00d9ff; font-size: 14pt; line-height: 1.8; flex-shrink: 0; }
+  .taint-source-badge { background: #ff2d55; color: #fff; font-size: 7pt; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
+  .taint-sink-badge   { background: #7c3aed; color: #fff; font-size: 7pt; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
+
+  /* Chain SVG */
+  .chain-diagram { margin: 12px 0; }
+  .chain-box { fill: #1a1a2e; rx: 6; ry: 6; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════ COVER PAGE ═══════════════════════ -->
+<div class="cover">
+  <div class="cover-logo">VEXIS</div>
+  <div class="cover-tagline">Vulnerability EXploration &amp; Inference System</div>
+  <div class="cover-tagline" style="margin-top:4px;font-size:10pt;color:#888;">Security Analysis Report — Confidential</div>
+
+  <table class="cover-meta" style="margin-top:40px;width:auto;">
+    <tr><td style="color:#888;width:140px;">Repository</td><td><strong>{{ scan_source }}</strong></td></tr>
+    <tr><td style="color:#888;">Scan Date</td><td>{{ scan_date }}</td></tr>
+    <tr><td style="color:#888;">Files Analyzed</td><td>{{ files_parsed }}</td></tr>
+    <tr><td style="color:#888;">Scan Duration</td><td>{{ duration }}</td></tr>
+    <tr><td style="color:#888;">Framework</td><td>{{ framework or "Not detected" }}</td></tr>
+  </table>
+
+  <div style="margin-top:50px;">
+    <div class="risk-label">Overall Risk Score</div>
+    <div class="risk-gauge" style="color:{{ risk_color }};">{{ risk_score }}/100</div>
+    <div class="risk-label">{{ risk_label }}</div>
+  </div>
+
+  <div style="margin-top:30px;">
+    <table style="width:auto;">
+      <thead><tr>
+        <th style="background:#ff2d55;padding:6px 16px;">CRITICAL</th>
+        <th style="background:#ff6b35;padding:6px 16px;">HIGH</th>
+        <th style="background:#ffd60a;color:#1a1a2e;padding:6px 16px;">MEDIUM</th>
+        <th style="background:#34c759;padding:6px 16px;">LOW</th>
+      </tr></thead>
+      <tbody><tr>
+        <td style="text-align:center;font-size:20pt;font-weight:800;color:#ff2d55;">{{ sev_counts.critical or 0 }}</td>
+        <td style="text-align:center;font-size:20pt;font-weight:800;color:#ff6b35;">{{ sev_counts.high or 0 }}</td>
+        <td style="text-align:center;font-size:20pt;font-weight:800;color:#d4a000;">{{ sev_counts.medium or 0 }}</td>
+        <td style="text-align:center;font-size:20pt;font-weight:800;color:#34c759;">{{ sev_counts.low or 0 }}</td>
+      </tr></tbody>
+    </table>
+  </div>
+</div>
+<div class="page-break"></div>
+
+<!-- ═══════════════════════ EXECUTIVE SUMMARY ═══════════════════════ -->
+<h2>Executive Summary</h2>
+
+<p>{{ executive_summary }}</p>
+
+{% if top_critical %}
+<h3>Top Critical Findings</h3>
+{% for f in top_critical %}
+<div class="callout callout-warn">
+  <strong>{{ f.cwe_id }} — {{ f.title }}</strong><br>
+  {{ f.description | truncate(300) }}
+</div>
+{% endfor %}
+{% endif %}
+
+<h3>Findings by Severity</h3>
+<table>
+  <thead><tr><th>Severity</th><th>Count</th><th>Risk</th></tr></thead>
+  <tbody>
+    {% for sev, count, risk in severity_rows %}
+    <tr>
+      <td><span class="badge badge-{{ sev }}">{{ sev }}</span></td>
+      <td>{{ count }}</td>
+      <td>{{ risk }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3>Vulnerability Classes</h3>
+<table>
+  <thead><tr><th>CWE</th><th>Class</th><th>Count</th></tr></thead>
+  <tbody>
+    {% for row in cwe_rows %}
+    <tr><td class="mono">{{ row.cwe_id }}</td><td>{{ row.title }}</td><td>{{ row.count }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="page-break"></div>
+
+<!-- ═══════════════════════ FINDINGS DETAIL ═══════════════════════ -->
+<h2>Findings Detail</h2>
+
+{% for f in findings %}
+<div>
+  <h3>
+    <span class="badge badge-{{ f.severity }}">{{ f.severity }}</span>
+    &nbsp;{{ f.title }}
+  </h3>
+
+  <table style="width:auto;margin-bottom:10px;">
+    <tr><td style="color:#888;width:120px;">CWE</td>
+        <td><a href="https://cwe.mitre.org/data/definitions/{{ f.cwe_id | replace('CWE-','') }}.html">{{ f.cwe_id }}</a></td></tr>
+    <tr><td style="color:#888;">OWASP</td><td>{{ f.owasp_category or "—" }}</td></tr>
+    <tr><td style="color:#888;">Confidence</td><td>{{ (f.confidence * 100) | int }}%</td></tr>
+    <tr><td style="color:#888;">Source</td><td class="mono">{{ f.source_file | basename }}:{{ f.source_line }}</td></tr>
+    <tr><td style="color:#888;">Sink</td><td class="mono">{{ f.sink_file | basename }}:{{ f.sink_line }}</td></tr>
+  </table>
+
+  <p>{{ f.description }}</p>
+
+  <!-- Taint path -->
+  {% if f.taint_steps %}
+  <h3>Taint Path</h3>
+  {% for step in f.taint_steps %}
+  <div class="taint-step">
+    {% if not loop.last %}<div class="taint-arrow">↓</div>{% else %}<div class="taint-arrow">⚡</div>{% endif %}
+    <div class="taint-node">
+      <span style="color:#00d9ff;">{{ step.file | basename }}:{{ step.line }}</span>
+      {% if loop.first %}<span class="taint-source-badge">SOURCE</span>{% endif %}
+      {% if loop.last %}<span class="taint-sink-badge">SINK</span>{% endif %}
+      <br>{{ step.code }}
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  <!-- Vulnerable code snippet -->
+  {% if f.source_code or f.sink_code %}
+  <h3>Vulnerable Code</h3>
+  {% if f.source_code %}
+  <p style="font-size:8.5pt;color:#888;margin-bottom:2px;">{{ f.source_file | basename }}:{{ f.source_line }} (source)</p>
+  <pre>{{ f.source_code }}</pre>
+  {% endif %}
+  {% if f.sink_code and f.sink_code != f.source_code %}
+  <p style="font-size:8.5pt;color:#888;margin-bottom:2px;">{{ f.sink_file | basename }}:{{ f.sink_line }} (sink)</p>
+  <pre>{{ f.sink_code }}</pre>
+  {% endif %}
+  {% endif %}
+
+  <!-- PoC -->
+  {% if f.attack_vector or f.poc_payload %}
+  <h3>Proof of Concept</h3>
+  {% if f.attack_vector %}<p><strong>Attack vector:</strong> {{ f.attack_vector }}</p>{% endif %}
+  {% if f.poc_payload %}
+  <pre>{{ f.poc_payload }}</pre>
+  {% endif %}
+  {% if f.expected_outcome %}<p><strong>Expected outcome:</strong> {{ f.expected_outcome }}</p>{% endif %}
+  {% endif %}
+
+  <!-- LLM reasoning excerpt -->
+  {% if f.llm_reasoning %}
+  <h3>AI Analysis</h3>
+  <div class="callout">{{ f.llm_reasoning | truncate(400) }}</div>
+  {% endif %}
+
+  <!-- Remediation -->
+  <h3>Remediation</h3>
+  <div class="callout">{{ f.remediation }}</div>
+
+  <!-- Chain findings get a special section -->
+  {% if f.is_chain and f.chain_steps %}
+  <h3>Attack Chain</h3>
+  <div class="callout callout-chain">
+    <p>This finding represents a multi-step attack chain. The individual vulnerabilities combine to create a higher-severity attack path.</p>
+    {% for step in f.chain_steps %}
+    <p style="margin:4px 0;"><strong>Step {{ loop.index }}:</strong> {{ step }}</p>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <hr>
+</div>
+{% if not loop.last and loop.index % 2 == 0 %}<div class="page-break"></div>{% endif %}
+{% endfor %}
+
+<div class="page-break"></div>
+
+<!-- ═══════════════════════ APPENDIX ═══════════════════════ -->
+<h2>Appendix</h2>
+
+<h3>Scan Metadata</h3>
+<table>
+  <tr><td>Scan ID</td><td class="mono">{{ scan_id }}</td></tr>
+  <tr><td>Duration</td><td>{{ duration }}</td></tr>
+  <tr><td>Files Parsed</td><td>{{ files_parsed }}</td></tr>
+  <tr><td>Taint Paths Analyzed</td><td>{{ taint_paths }}</td></tr>
+  <tr><td>LLM Calls Used</td><td>{{ llm_calls }}</td></tr>
+  <tr><td>Framework Detected</td><td>{{ framework or "None" }}</td></tr>
+  {% if skipped_large %}<tr><td>Large Files Skipped</td><td>{{ skipped_large | join(", ") }}</td></tr>{% endif %}
+</table>
+
+<h3>OWASP Top 10 Mapping</h3>
+<table>
+  <thead><tr><th>OWASP Category</th><th>Findings</th></tr></thead>
+  <tbody>
+    {% for row in owasp_rows %}
+    <tr><td>{{ row.category }}</td><td>{{ row.count }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3>Glossary</h3>
+<table>
+  <thead><tr><th>Term</th><th>Definition</th></tr></thead>
+  <tbody>
+    <tr><td>Taint analysis</td><td>Static analysis technique that tracks untrusted input (sources) through a program to dangerous operations (sinks)</td></tr>
+    <tr><td>Source</td><td>A location where untrusted user-controlled data enters the program (e.g., request.args.get)</td></tr>
+    <tr><td>Sink</td><td>A location where data is used in a security-sensitive operation (e.g., db.execute, os.system)</td></tr>
+    <tr><td>Sanitizer</td><td>Code that transforms untrusted data into a safe form (e.g., parameterized queries, html.escape)</td></tr>
+    <tr><td>Cross-file taint</td><td>Taint flows that cross function call boundaries or module imports</td></tr>
+    <tr><td>Attack chain</td><td>Multiple individually lower-severity vulnerabilities that combine into a higher-severity exploit path</td></tr>
+    <tr><td>Second-order injection</td><td>Attack where malicious data is stored in a database and triggered in a later request</td></tr>
+    <tr><td>TOCTOU</td><td>Time-Of-Check-Time-Of-Use race condition between a security check and the protected operation</td></tr>
+  </tbody>
+</table>
+
+<p style="margin-top:24px;font-size:8.5pt;color:#888;">
+  Generated by VEXIS v0.1.0 · <a href="https://github.com/mananshah237/vexis">github.com/mananshah237/vexis</a>
+</p>
+
+</body>
+</html>
