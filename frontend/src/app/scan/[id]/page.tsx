@@ -43,6 +43,26 @@ export default function ScanResultsPage() {
   const router = useRouter();
   const apiBase = process.env.NEXT_PUBLIC_API_URL;
   const [activeTab, setActiveTab] = useState<"findings" | "semgrep">("findings");
+  const [expandedExploits, setExpandedExploits] = useState<Set<string>>(new Set());
+  const [copiedExploit, setCopiedExploit] = useState<string | null>(null);
+
+  function toggleExploit(id: string, e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setExpandedExploits((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  async function copyExploit(id: string, script: string, e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    await navigator.clipboard.writeText(script);
+    setCopiedExploit(id);
+    setTimeout(() => setCopiedExploit(null), 2000);
+  }
 
   const { data: scan, mutate: mutateScan } = useSWR(
     `${apiBase}/api/v1/scan/${id}`,
@@ -274,40 +294,100 @@ export default function ScanResultsPage() {
           <div className="space-y-2">
             {sortedFindings.map((f: any) => {
               const isDiscovery = f.taint_path?.type === "business_logic_discovery";
+              const hasExploit = !!f.exploit_script;
+              const exploitExpanded = expandedExploits.has(f.id);
               return (
-                <Link
+                <div
                   key={f.id}
-                  href={`/scan/${id}/finding/${f.id}`}
-                  className={`flex items-start justify-between p-4 bg-bg-secondary border rounded-xl hover:border-accent-primary transition-colors group ${
+                  className={`bg-bg-secondary border rounded-xl transition-colors ${
                     isDiscovery ? "border-[#7C4DFF]/30" : "border-border"
-                  }`}
+                  } ${exploitExpanded ? "" : "hover:border-accent-primary"}`}
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-3 mb-1 flex-wrap">
-                      <span className={`font-bold uppercase text-xs ${SEV_COLORS[f.severity] ?? ""}`}>
-                        {f.severity}
-                      </span>
-                      <span className="font-code text-xs text-text-muted">{f.cwe_id}</span>
-                      <span className="font-code text-xs text-text-muted">
-                        {Math.round((f.confidence ?? 0) * 100)}% confidence
-                      </span>
-                      {isDiscovery && (
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold bg-[#7C4DFF]/15 text-[#7C4DFF] border border-[#7C4DFF]/30">
-                          ✦ Discovered by AI
+                  {/* Main clickable row */}
+                  <Link
+                    href={`/scan/${id}/finding/${f.id}`}
+                    className="flex items-start justify-between p-4 group"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-3 mb-1 flex-wrap">
+                        <span className={`font-bold uppercase text-xs ${SEV_COLORS[f.severity] ?? ""}`}>
+                          {f.severity}
                         </span>
+                        <span className="font-code text-xs text-text-muted">{f.cwe_id}</span>
+                        <span className="font-code text-xs text-text-muted">
+                          {Math.round((f.confidence ?? 0) * 100)}% confidence
+                        </span>
+                        {isDiscovery && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold bg-[#7C4DFF]/15 text-[#7C4DFF] border border-[#7C4DFF]/30">
+                            ✦ Discovered by AI
+                          </span>
+                        )}
+                        {hasExploit && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold bg-severity-critical/10 text-severity-critical border border-severity-critical/25">
+                            ⚡ Exploit
+                          </span>
+                        )}
+                      </div>
+                      <p className="font-semibold text-sm text-text-primary">{f.title}</p>
+                      <p className="text-xs text-text-muted mt-1 font-code">
+                        {f.source_file?.split("/").pop()}:{f.source_line}
+                        <span className="mx-1.5 text-text-muted">→</span>
+                        {f.sink_file?.split("/").pop()}:{f.sink_line}
+                      </p>
+                    </div>
+                    <span className="text-text-muted text-sm ml-4 group-hover:text-accent-primary flex-shrink-0">
+                      →
+                    </span>
+                  </Link>
+
+                  {/* Exploit script section */}
+                  {hasExploit && (
+                    <div className="border-t border-border">
+                      <button
+                        onClick={(e) => toggleExploit(f.id, e)}
+                        className="w-full flex items-center justify-between px-4 py-2 text-xs text-text-muted hover:text-severity-critical transition-colors"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <span>⚡</span>
+                          <span className="font-semibold">Exploit Script</span>
+                          <span className="text-text-muted/60">— runnable PoC</span>
+                        </span>
+                        <span className="font-code">{exploitExpanded ? "▴ hide" : "▾ show"}</span>
+                      </button>
+
+                      {exploitExpanded && (
+                        <div className="px-4 pb-4">
+                          <div className="relative rounded-lg bg-[#0d0d0d] border border-border overflow-hidden">
+                            {/* Toolbar */}
+                            <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-bg-primary/40">
+                              <span className="font-code text-xs text-text-muted">exploit_{f.id.slice(0, 8)}.py</span>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={(e) => copyExploit(f.id, f.exploit_script, e)}
+                                  className="text-xs text-text-muted hover:text-text-primary transition-colors px-2 py-0.5 rounded border border-border/50 hover:border-border"
+                                >
+                                  {copiedExploit === f.id ? "✓ Copied" : "Copy"}
+                                </button>
+                                <a
+                                  href={`${apiBase}/api/v1/finding/${f.id}/exploit`}
+                                  download={`exploit_${f.id.slice(0, 8)}.py`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-xs text-text-muted hover:text-text-primary transition-colors px-2 py-0.5 rounded border border-border/50 hover:border-border"
+                                >
+                                  Download
+                                </a>
+                              </div>
+                            </div>
+                            {/* Code */}
+                            <pre className="font-code text-xs text-text-secondary p-4 overflow-x-auto max-h-72 leading-relaxed whitespace-pre">
+                              {f.exploit_script}
+                            </pre>
+                          </div>
+                        </div>
                       )}
                     </div>
-                    <p className="font-semibold text-sm text-text-primary">{f.title}</p>
-                    <p className="text-xs text-text-muted mt-1 font-code">
-                      {f.source_file?.split("/").pop()}:{f.source_line}
-                      <span className="mx-1.5 text-text-muted">→</span>
-                      {f.sink_file?.split("/").pop()}:{f.sink_line}
-                    </p>
-                  </div>
-                  <span className="text-text-muted text-sm ml-4 group-hover:text-accent-primary flex-shrink-0">
-                    →
-                  </span>
-                </Link>
+                  )}
+                </div>
               );
             })}
           </div>
