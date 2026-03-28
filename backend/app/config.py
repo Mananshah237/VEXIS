@@ -79,6 +79,7 @@ class Settings(BaseSettings):
 
     # MinIO object storage
     minio_endpoint: str = "localhost:9000"
+    minio_public_endpoint: str = ""  # Public-facing URL base for presigned URLs, e.g. http://localhost:9000
     minio_access_key: str = "vexis"
     minio_secret_key: str = ""  # Required in production — set MINIO_SECRET_KEY env var
     minio_secure: bool = False

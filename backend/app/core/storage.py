@@ -94,13 +94,26 @@ async def upload_artifact(scan_id: str, artifact_name: str, data: dict | list) -
 
 
 def get_signed_url(bucket: str, object_name: str, expires_seconds: int = 3600) -> Optional[str]:
-    """Generate a presigned GET URL valid for expires_seconds."""
+    """Generate a presigned GET URL valid for expires_seconds.
+
+    If MINIO_PUBLIC_ENDPOINT is set, rewrites the internal endpoint in the URL
+    so it is accessible from outside Docker (e.g. http://localhost:9000 instead
+    of http://minio:9000).
+    """
     client = get_client()
     if not client:
         return None
     try:
         from datetime import timedelta
         url = client.presigned_get_object(bucket, object_name, expires=timedelta(seconds=expires_seconds))
+        # Rewrite internal hostname to public-facing endpoint when configured
+        public_endpoint = os.environ.get("MINIO_PUBLIC_ENDPOINT", "")
+        if public_endpoint and url:
+            internal = os.environ.get("MINIO_ENDPOINT", "")
+            if internal and internal in url:
+                scheme = "https" if os.environ.get("MINIO_SECURE", "").lower() == "true" else "http"
+                url = url.replace(f"http://{internal}", public_endpoint, 1)
+                url = url.replace(f"https://{internal}", public_endpoint, 1)
         return url
     except Exception as e:
         log.warning("minio.presigned_url_failed", bucket=bucket, object=object_name, error=str(e))

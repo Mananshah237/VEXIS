@@ -280,6 +280,13 @@ async def _run_scan_impl(scan_id: str) -> None:
                     scan_id, scan, db
                 )
 
+            # ── Unfold graph-folded paths — restore intermediate nodes for full taint path ──
+            folded_pdg = taint_engine.get_last_folded_pdg()
+            if folded_pdg and taint_paths:
+                from app.ingestion.graph_folder import unfold_path
+                for tp in taint_paths:
+                    tp.path = unfold_path(tp.path, folded_pdg)
+
             # ── Pre-dedup: collapse paths to the same sink before ANY LLM calls ──────
             # Without this, 30 log_injection paths to the same 3 sinks would burn
             # 30 LLM calls. After pre-dedup, we get at most 3.

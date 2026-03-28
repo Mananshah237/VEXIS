@@ -1,5 +1,9 @@
 """
 Trust boundary definitions — sources, sinks, and sanitizers for Python.
+CCSM: sanitizers carry a continuous constraint_power (0.0–1.0) instead of
+a boolean is_partial flag.  constraint_power is applied multiplicatively when
+propagating taint: new_danger = current_danger * (1.0 - constraint_power).
+A path whose effective danger drops below DANGER_THRESHOLD is suppressed.
 """
 from dataclasses import dataclass, field
 
@@ -24,9 +28,14 @@ class SinkPattern:
 class SanitizerPattern:
     pattern: str
     clears_for: list[str] = field(default_factory=list)  # kept for backward compat
-    is_partial: bool = False
+    constraint_power: float = 0.0  # 0.0=no constraint, 1.0=full elimination
     description: str = ""
-    effective_for: list[str] = field(default_factory=list)  # which vuln_classes this actually protects
+    effective_for: list[str] = field(default_factory=list)  # vuln_classes this actually protects
+
+    @property
+    def is_partial(self) -> bool:
+        """Backward-compat: any sanitizer with constraint_power < 0.95 is 'partial'."""
+        return self.constraint_power < 0.95
 
 
 TAINT_SOURCES: list[SourcePattern] = [
@@ -113,57 +122,97 @@ TAINT_SINKS: list[SinkPattern] = [
 ]
 
 SANITIZERS: list[SanitizerPattern] = [
-    # SQLi sanitizers — parameterized queries (only protect against SQLi)
-    SanitizerPattern('?", (', clears_for=["sqli"], effective_for=["sqli"], description="SQLite ? placeholder with tuple params (double quotes)"),
-    SanitizerPattern("?', (", clears_for=["sqli"], effective_for=["sqli"], description="SQLite ? placeholder with tuple params (single quotes)"),
-    SanitizerPattern('?", [', clears_for=["sqli"], effective_for=["sqli"], description="SQLite ? placeholder with list params"),
-    SanitizerPattern('%s", (', clears_for=["sqli"], effective_for=["sqli"], description="DB-API %s placeholder with tuple params"),
-    SanitizerPattern("%s', (", clears_for=["sqli"], effective_for=["sqli"], description="DB-API %s placeholder with tuple params"),
-    SanitizerPattern('execute(%s,', clears_for=["sqli"], effective_for=["sqli"], description="DB-API %s direct"),
-    SanitizerPattern("execute(%s,", clears_for=["sqli"], effective_for=["sqli"], description="DB-API %s direct"),
-    SanitizerPattern(".filter(", clears_for=["sqli"], effective_for=["sqli"], description="ORM filter (parameterized)"),
-    SanitizerPattern(".filter_by(", clears_for=["sqli"], effective_for=["sqli"], description="ORM filter_by"),
+    # SQLi sanitizers — parameterized queries (constraint_power=0.99)
+    SanitizerPattern('?", (', clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="SQLite ? placeholder with tuple params (double quotes)"),
+    SanitizerPattern("?', (", clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="SQLite ? placeholder with tuple params (single quotes)"),
+    SanitizerPattern('?", [', clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="SQLite ? placeholder with list params"),
+    SanitizerPattern('%s", (', clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="DB-API %s placeholder with tuple params"),
+    SanitizerPattern("%s', (", clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="DB-API %s placeholder with tuple params"),
+    SanitizerPattern('execute(%s,', clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="DB-API %s direct"),
+    SanitizerPattern("execute(%s,", clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="DB-API %s direct"),
+    SanitizerPattern(".filter(", clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="ORM filter (parameterized)"),
+    SanitizerPattern(".filter_by(", clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="ORM filter_by"),
 
-    # CMDi sanitizers (only protect against command injection)
-    SanitizerPattern("shlex.quote(", clears_for=["cmdi"], effective_for=["cmdi"], description="Shell quoting"),
-    SanitizerPattern("shlex.split(", clears_for=["cmdi"], effective_for=["cmdi"], description="Shell split"),
+    # CMDi sanitizers
+    SanitizerPattern("shlex.quote(", clears_for=["cmdi"], constraint_power=0.90,
+                     effective_for=["cmdi"], description="Shell quoting"),
+    SanitizerPattern("shlex.split(", clears_for=["cmdi"], constraint_power=0.75,
+                     effective_for=["cmdi"], description="Shell split (safer than string concat)"),
 
-    # Path traversal sanitizers (only protect against path traversal)
+    # Path traversal sanitizers
     SanitizerPattern(
         "os.path.realpath(",
         clears_for=[],
-        is_partial=True,
+        constraint_power=0.50,
         effective_for=["path_traversal"],
         description="Resolves symlinks but still needs startswith(SAFE_DIR) prefix check",
     ),
-    SanitizerPattern("os.path.abspath(", clears_for=[], is_partial=True,
+    SanitizerPattern("os.path.abspath(", clears_for=[], constraint_power=0.40,
                      effective_for=["path_traversal"],
                      description="Normalizes path but needs prefix check to be safe"),
 
-    # XSS sanitizers — ONLY protect against XSS, NOT SQLi or CMDi
-    SanitizerPattern("html.escape(", clears_for=["xss"], effective_for=["xss"], description="HTML escaping (XSS only)"),
-    SanitizerPattern("markupsafe.escape(", clears_for=["xss"], effective_for=["xss"], description="Markupsafe escape (XSS only)"),
-    SanitizerPattern("escape(", clears_for=["xss"], effective_for=["xss"], description="Generic escape function (XSS only)"),
-    SanitizerPattern("bleach.clean(", clears_for=["xss"], effective_for=["xss"], description="Bleach HTML sanitizer (XSS only)"),
-    SanitizerPattern("DOMPurify.sanitize(", clears_for=["xss"], effective_for=["xss"], description="DOMPurify (XSS only)"),
+    # XSS sanitizers — ONLY protect against XSS
+    SanitizerPattern("html.escape(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"], description="HTML escaping (XSS only)"),
+    SanitizerPattern("markupsafe.escape(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"], description="Markupsafe escape (XSS only)"),
+    SanitizerPattern("escape(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"], description="Generic escape function (XSS only)"),
+    SanitizerPattern("bleach.clean(", clears_for=["xss"], constraint_power=0.85,
+                     effective_for=["xss"], description="Bleach HTML sanitizer (XSS only)"),
+    SanitizerPattern("DOMPurify.sanitize(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"], description="DOMPurify (XSS only)"),
 
     # Deserialization sanitizers
-    SanitizerPattern("yaml.safe_load(", clears_for=["deserialization"], effective_for=["deserialization"], description="Safe YAML loading"),
-    SanitizerPattern("SafeLoader", clears_for=["deserialization"], effective_for=["deserialization"], description="YAML SafeLoader"),
+    SanitizerPattern("yaml.safe_load(", clears_for=["deserialization"], constraint_power=0.95,
+                     effective_for=["deserialization"], description="Safe YAML loading"),
+    SanitizerPattern("SafeLoader", clears_for=["deserialization"], constraint_power=0.95,
+                     effective_for=["deserialization"], description="YAML SafeLoader"),
 
     # SSRF sanitizers
-    SanitizerPattern("urlparse(", clears_for=[], is_partial=True, effective_for=["ssrf"], description="URL parsing (partial — needs allowlist check)"),
-    SanitizerPattern(".hostname", clears_for=[], is_partial=True, effective_for=["ssrf"], description="Hostname extraction (partial)"),
-    SanitizerPattern("urllib.parse.quote(", clears_for=[], is_partial=True, effective_for=["ssrf"], description="URL encoding (partial)"),
+    SanitizerPattern("urlparse(", clears_for=[], constraint_power=0.30,
+                     effective_for=["ssrf", "open_redirect"],
+                     description="URL parsing (partial — needs allowlist check)"),
+    SanitizerPattern(".hostname", clears_for=[], constraint_power=0.20,
+                     effective_for=["ssrf"], description="Hostname extraction (partial)"),
+    SanitizerPattern("urllib.parse.quote(", clears_for=[], constraint_power=0.10,
+                     effective_for=["ssrf"], description="URL encoding (partial — does not restrict destination)"),
 
     # SSTI sanitizers
-    SanitizerPattern("SandboxedEnvironment", clears_for=["ssti"], effective_for=["ssti"], description="Jinja2 sandboxed environment"),
+    SanitizerPattern("SandboxedEnvironment", clears_for=["ssti"], constraint_power=0.95,
+                     effective_for=["ssti"], description="Jinja2 sandboxed environment"),
+
+    # Weak string manipulation — low constraint, easily bypassed
+    # Listed AFTER more specific patterns so specific matches win
+    SanitizerPattern("re.match(", clears_for=[], constraint_power=0.70,
+                     effective_for=["sqli", "cmdi", "path_traversal"],
+                     description="Regex match — constraining if pattern is strict"),
+    SanitizerPattern("re.sub(", clears_for=[], constraint_power=0.50,
+                     effective_for=["sqli", "cmdi", "log_injection"],
+                     description="Regex substitution — partial constraint"),
+    SanitizerPattern(".replace(", clears_for=[], constraint_power=0.15,
+                     effective_for=["sqli", "log_injection"],
+                     description="String replace — single-pass, trivially bypassed"),
+    SanitizerPattern(".strip(", clears_for=[], constraint_power=0.05,
+                     effective_for=["log_injection"],
+                     description="Strip whitespace — near-zero security constraint"),
 
     # Numeric type casting — effective for ALL injection types (output is non-injectable)
     SanitizerPattern("int(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
+                     constraint_power=0.95,
                      effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
                      description="Integer cast — output is always numeric, cannot be injected"),
     SanitizerPattern("float(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
+                     constraint_power=0.95,
                      effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
                      description="Float cast — output is always numeric"),
 ]
@@ -228,43 +277,60 @@ JS_TAINT_SINKS: list[SinkPattern] = [
 ]
 
 JS_SANITIZERS: list[SanitizerPattern] = [
-    # SQLi — parameterized queries
-    # Note: "?, [" misses cases like "?', [" where the ? is inside a quoted string
-    # Use "query('" and 'query("' to detect literal-string first argument (parameterized)
-    SanitizerPattern("query('", clears_for=["sqli"], effective_for=["sqli"],
+    # SQLi — parameterized queries (more specific patterns first)
+    SanitizerPattern("query('", clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"],
                      description="JS query() with single-quoted string first arg = parameterized"),
-    SanitizerPattern('query("', clears_for=["sqli"], effective_for=["sqli"],
+    SanitizerPattern('query("', clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"],
                      description="JS query() with double-quoted string first arg = parameterized"),
-    SanitizerPattern("?, [", clears_for=["sqli"], effective_for=["sqli"], description="MySQL ? placeholder fallback"),
-    SanitizerPattern('db.query("', clears_for=["sqli"], effective_for=["sqli"], description="Literal SQL string (no template)"),
-    SanitizerPattern(".where(", clears_for=["sqli"], effective_for=["sqli"], description="Knex/Sequelize where clause"),
-    # CMDi — execFile also effectively prevents XSS via stdout (output is structured, not user-reflected HTML)
-    SanitizerPattern("execFile(", clears_for=["cmdi", "xss"], effective_for=["cmdi", "xss"],
+    SanitizerPattern("?, [", clears_for=["sqli"], constraint_power=0.90,
+                     effective_for=["sqli"], description="MySQL ? placeholder fallback"),
+    SanitizerPattern('db.query("', clears_for=["sqli"], constraint_power=0.99,
+                     effective_for=["sqli"], description="Literal SQL string (no template)"),
+    SanitizerPattern(".where(", clears_for=["sqli"], constraint_power=0.95,
+                     effective_for=["sqli"], description="Knex/Sequelize where clause"),
+    # CMDi
+    SanitizerPattern("execFile(", clears_for=["cmdi", "xss"], constraint_power=0.90,
+                     effective_for=["cmdi", "xss"],
                      description="execFile: no shell, stdout not directly user-controlled HTML"),
-    SanitizerPattern("shell-escape", clears_for=["cmdi"], effective_for=["cmdi"]),
-    SanitizerPattern("shellEscape(", clears_for=["cmdi"], effective_for=["cmdi"]),
+    SanitizerPattern("shell-escape", clears_for=["cmdi"], constraint_power=0.90,
+                     effective_for=["cmdi"]),
+    SanitizerPattern("shellEscape(", clears_for=["cmdi"], constraint_power=0.90,
+                     effective_for=["cmdi"]),
     # XSS
-    SanitizerPattern("DOMPurify.sanitize(", clears_for=["xss"], effective_for=["xss"]),
-    SanitizerPattern("escape-html", clears_for=["xss"], effective_for=["xss"]),
-    SanitizerPattern("he.encode(", clears_for=["xss"], effective_for=["xss"]),
-    SanitizerPattern("escapeHtml(", clears_for=["xss"], effective_for=["xss"]),
+    SanitizerPattern("DOMPurify.sanitize(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"]),
+    SanitizerPattern("escape-html", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"]),
+    SanitizerPattern("he.encode(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"]),
+    SanitizerPattern("escapeHtml(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"]),
     # Path traversal
-    SanitizerPattern("path.resolve(", clears_for=[], is_partial=True, effective_for=["path_traversal"],
+    SanitizerPattern("path.resolve(", clears_for=[], constraint_power=0.45,
+                     effective_for=["path_traversal"],
                      description="path.resolve() — needs startsWith check to be effective"),
-    SanitizerPattern(".startsWith(", clears_for=[], is_partial=True, effective_for=["path_traversal"],
+    SanitizerPattern(".startsWith(", clears_for=[], constraint_power=0.40,
+                     effective_for=["path_traversal"],
                      description="startsWith check — needs path.resolve() too"),
     # SSRF
-    SanitizerPattern("new URL(", clears_for=[], is_partial=True, effective_for=["ssrf"],
+    SanitizerPattern("new URL(", clears_for=[], constraint_power=0.30,
+                     effective_for=["ssrf"],
                      description="URL parsing — needs allowlist check"),
-    SanitizerPattern(".hostname", clears_for=[], is_partial=True, effective_for=["ssrf"]),
+    SanitizerPattern(".hostname", clears_for=[], constraint_power=0.20,
+                     effective_for=["ssrf"]),
     # Numeric type casting
     SanitizerPattern("parseInt(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
+                     constraint_power=0.95,
                      effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
                      description="parseInt — numeric output is safe"),
     SanitizerPattern("parseFloat(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
+                     constraint_power=0.95,
                      effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
                      description="parseFloat — numeric output is safe"),
     SanitizerPattern("Number(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
+                     constraint_power=0.95,
                      effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "ssti", "xss"],
                      description="Number() cast — numeric output is safe"),
 ]
@@ -284,12 +350,12 @@ REDIRECT_SINKS: list[SinkPattern] = [
                 description="Express redirect → CWE-601"),
 ]
 REDIRECT_SANITIZERS: list[SanitizerPattern] = [
-    SanitizerPattern(".startswith('/')", clears_for=["open_redirect"],
+    SanitizerPattern(".startswith('/')", clears_for=["open_redirect"], constraint_power=0.85,
                      effective_for=["open_redirect"],
                      description="Relative URL check — prevents off-site redirect"),
-    SanitizerPattern('.startswith("/")', clears_for=["open_redirect"],
+    SanitizerPattern('.startswith("/")', clears_for=["open_redirect"], constraint_power=0.85,
                      effective_for=["open_redirect"]),
-    SanitizerPattern("urlparse(", clears_for=[], is_partial=True,
+    SanitizerPattern("urlparse(", clears_for=[], constraint_power=0.30,
                      effective_for=["open_redirect"],
                      description="URL parsing — needs netloc check to be effective"),
 ]
@@ -308,12 +374,15 @@ LOG_SINKS: list[SinkPattern] = [
                 description="print() used as logging → CWE-117"),
 ]
 LOG_SANITIZERS: list[SanitizerPattern] = [
+    # Specific newline-stripping patterns (high constraint — listed before generic re.sub)
     SanitizerPattern('.replace("\\n", "").replace("\\r", "")',
-                     clears_for=["log_injection"], effective_for=["log_injection"],
+                     clears_for=["log_injection"], constraint_power=0.85,
+                     effective_for=["log_injection"],
                      description="Newline stripping — prevents log forging"),
     SanitizerPattern(".replace('\\n', '').replace('\\r', '')",
-                     clears_for=["log_injection"], effective_for=["log_injection"]),
-    SanitizerPattern("re.sub(r'[\\r\\n]'", clears_for=["log_injection"],
+                     clears_for=["log_injection"], constraint_power=0.85,
+                     effective_for=["log_injection"]),
+    SanitizerPattern("re.sub(r'[\\r\\n]'", clears_for=["log_injection"], constraint_power=0.85,
                      effective_for=["log_injection"],
                      description="Regex newline removal"),
 ]
@@ -330,11 +399,12 @@ LDAP_SINKS: list[SinkPattern] = [
                 description="LDAP search call"),
 ]
 LDAP_SANITIZERS: list[SanitizerPattern] = [
-    SanitizerPattern("escape_filter_chars(", clears_for=["ldap_injection"],
+    SanitizerPattern("escape_filter_chars(", clears_for=["ldap_injection"], constraint_power=0.90,
                      effective_for=["ldap_injection"],
                      description="ldap.filter.escape_filter_chars() — prevents LDAP injection"),
     SanitizerPattern("ldap.filter.escape_filter_chars(",
-                     clears_for=["ldap_injection"], effective_for=["ldap_injection"]),
+                     clears_for=["ldap_injection"], constraint_power=0.90,
+                     effective_for=["ldap_injection"]),
 ]
 
 # CWE-611: XML External Entity (XXE)
@@ -349,11 +419,13 @@ XXE_SINKS: list[SinkPattern] = [
     SinkPattern("parseString(",        vuln_class="xxe", severity="high"),
 ]
 XXE_SANITIZERS: list[SanitizerPattern] = [
-    SanitizerPattern("defusedxml.",      clears_for=["xxe"], effective_for=["xxe"],
+    SanitizerPattern("defusedxml.",      clears_for=["xxe"], constraint_power=0.95,
+                     effective_for=["xxe"],
                      description="defusedxml — safe XML parser"),
-    SanitizerPattern("resolve_entities=False", clears_for=["xxe"], effective_for=["xxe"],
+    SanitizerPattern("resolve_entities=False", clears_for=["xxe"], constraint_power=0.90,
+                     effective_for=["xxe"],
                      description="lxml with external entity resolution disabled"),
-    SanitizerPattern("XMLParser(resolve_entities=False", clears_for=["xxe"],
+    SanitizerPattern("XMLParser(resolve_entities=False", clears_for=["xxe"], constraint_power=0.95,
                      effective_for=["xxe"]),
 ]
 

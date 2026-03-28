@@ -1,8 +1,15 @@
 """
 Core taint analysis engine.
 Worklist-based dataflow propagation over the PDG.
+
+CCSM: sanitizer strength is expressed as constraint_power (0.0-1.0).
+danger_score starts at 1.0 and is multiplied by (1 - constraint_power) for
+each sanitizer encountered. Paths whose effective danger (for the specific
+sink type) drops below DANGER_THRESHOLD are suppressed; the score is used
+directly as taint_confidence in findings.
 """
 from __future__ import annotations
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
@@ -67,6 +74,7 @@ class TaintState:
     source: TaintSource
     path: list[TaintNode]
     path_sanitizers: list[SanitizerPattern] = field(default_factory=list)
+    danger_score: float = 1.0  # starts at 1.0, reduced multiplicatively by sanitizers
 
 
 class TaintEngine:
@@ -77,6 +85,8 @@ class TaintEngine:
         self._sources = TAINT_SOURCES + JS_TAINT_SOURCES
         self._sinks = TAINT_SINKS + JS_TAINT_SINKS + EXTRA_SINKS
         self._sanitizers = SANITIZERS + JS_SANITIZERS + EXTRA_SANITIZERS
+        # Early-termination threshold: paths with danger below this are not reported
+        self._danger_threshold = float(os.environ.get("VEXIS_DANGER_THRESHOLD", "0.15"))
 
     def apply_framework_profile(self, profile: "FrameworkProfile") -> None:
         """Merge framework-specific patterns into the running engine."""
@@ -100,11 +110,20 @@ class TaintEngine:
         unified = CrossFileLinker().link(pdgs, call_graph)
         return self.analyze(unified)
 
+    def get_last_folded_pdg(self) -> "PDG | None":
+        """Return the folded PDG from the most recent analyze() call, for unfolding paths."""
+        return getattr(self, "_last_folded_pdg", None)
+
     def analyze(self, pdg: PDG) -> list[TaintPath]:
+        # Graph folding: collapse passthrough chains before worklist traversal
+        from app.ingestion.graph_folder import fold_pdg
+        pdg = fold_pdg(pdg)
+        self._last_folded_pdg = pdg  # stored for path unfolding after analysis
+
         paths: list[TaintPath] = []
         worklist: list[TaintState] = []
 
-        # Seed worklist with taint sources
+        # Seed worklist with taint sources (danger_score starts at 1.0)
         for node in pdg.nodes():
             source_pattern = self._match_source(node)
             if source_pattern:
@@ -115,6 +134,7 @@ class TaintEngine:
                     taint_type=TaintType.TAINTED,
                     source=source,
                     path=[TaintNode(node=node, taint_type=TaintType.TAINTED, label=f"User input via {source_pattern.source_type}")],
+                    danger_score=1.0,
                 )
                 worklist.append(state)
                 log.debug("taint.source", file=node.file, line=node.line, pattern=source_pattern.pattern)
@@ -145,8 +165,10 @@ class TaintEngine:
                 _effective_sanitizers = list(state.path_sanitizers)
                 if _node_sanitizer:
                     _effective_sanitizers.append(_node_sanitizer)
-                if not self._sanitized_for_sink(_effective_sanitizers, sink_pattern.vuln_class):
-                    confidence = self._calc_confidence(state, sink_pattern)
+                # Compute effective danger for this specific sink type (CCSM)
+                effective_danger = self._calc_effective_danger(_effective_sanitizers, sink_pattern.vuln_class)
+                if effective_danger >= self._danger_threshold:
+                    confidence = self._calc_confidence(state, sink_pattern, effective_danger)
                     path = TaintPath(
                         source=state.source,
                         sink=TaintSink(node=current_node, pattern=sink_pattern),
@@ -162,6 +184,7 @@ class TaintEngine:
                         source_line=state.source.node.line,
                         sink_line=current_node.line,
                         confidence=confidence,
+                        effective_danger=round(effective_danger, 3),
                     )
                 continue  # Don't propagate further past the sink
 
@@ -169,16 +192,29 @@ class TaintEngine:
             for successor in pdg.get_data_successors(current_node):
                 sanitizer = self._match_sanitizer(successor)
                 new_taint_type = state.taint_type
+                new_danger = state.danger_score
 
                 if sanitizer:
+                    # Apply constraint to propagation-time danger score
+                    new_danger = state.danger_score * (1.0 - sanitizer.constraint_power)
                     if sanitizer.is_partial:
-                        new_taint_type = TaintType.PARTIALLY_SANITIZED
                         label = f"Partial sanitization: {sanitizer.pattern}"
                     else:
-                        # Mark as sanitized but keep propagating — effectiveness
-                        # is evaluated at the sink (context-sensitive)
-                        new_taint_type = TaintType.PARTIALLY_SANITIZED
                         label = f"Sanitized by: {sanitizer.pattern}"
+                    new_taint_type = TaintType.PARTIALLY_SANITIZED
+                    log.debug(
+                        "taint.propagation",
+                        danger_score=round(new_danger, 3),
+                        sanitizer=sanitizer.pattern,
+                        constraint=sanitizer.constraint_power,
+                    )
+                    # Early termination: if even the worst-case path danger drops below
+                    # threshold, stop propagating — no sink of any type would fire
+                    if new_danger < self._danger_threshold:
+                        log.debug("taint.early_termination",
+                                  danger=round(new_danger, 3),
+                                  threshold=self._danger_threshold)
+                        continue
                 else:
                     label = f"Data flows to: {successor.label}"
 
@@ -195,6 +231,7 @@ class TaintEngine:
                     source=state.source,
                     path=new_path,
                     path_sanitizers=new_sanitizers,
+                    danger_score=new_danger,
                 )
                 worklist.append(new_state)
 
@@ -259,35 +296,35 @@ class TaintEngine:
                 return pattern
         return None
 
-    def _sanitized_for_sink(self, sanitizers: list, vuln_class: str) -> bool:
+    def _calc_effective_danger(self, sanitizers: list, vuln_class: str) -> float:
         """
-        Returns True if the taint path has been FULLY sanitized for this specific
-        sink type. A sanitizer is only effective if its effective_for list includes
-        the sink's vuln_class.
+        Compute the effective danger score for a specific sink type (CCSM).
+        Multiplies (1 - constraint_power) for each sanitizer effective for vuln_class.
+        Returns 1.0 if no sanitizers present (fully dangerous).
 
-        This enables context-sensitive sanitizer evaluation:
-          html.escape() → effective for xss, NOT for sqli
-          shlex.quote() → effective for cmdi, NOT for xss
-          parameterized query → effective for sqli, NOT for cmdi
+        Context-sensitive: html.escape() effective for xss, NOT sqli.
         """
-        if not sanitizers:
-            return False
-        # All sanitizers on the path must be effective for this vuln_class
-        # AND at least one must be non-partial for this vuln_class
-        has_effective = False
+        danger = 1.0
         for san in sanitizers:
-            if san.effective_for and vuln_class in san.effective_for and not san.is_partial:
-                has_effective = True
-        return has_effective
+            if san.effective_for and vuln_class in san.effective_for:
+                danger *= (1.0 - san.constraint_power)
+        return danger
 
-    def _calc_confidence(self, state: TaintState, sink: SinkPattern) -> float:
-        base = 0.7
-        if state.taint_type == TaintType.PARTIALLY_SANITIZED:
-            base = 0.5
+    def _sanitized_for_sink(self, sanitizers: list, vuln_class: str) -> bool:
+        """Backward-compat wrapper: a path is sanitized if effective danger is below threshold."""
+        return self._calc_effective_danger(sanitizers, vuln_class) < self._danger_threshold
+
+    def _calc_confidence(self, state: TaintState, sink: SinkPattern, effective_danger: float = 0.7) -> float:
+        """Map effective danger score to finding confidence.
+
+        effective_danger=1.0 (no sanitization) → high confidence
+        effective_danger=0.30 (moderate sanitization) → lower confidence
+        """
+        base = effective_danger
         if sink.severity == "critical":
-            base = min(base + 0.1, 1.0)
+            base = min(base + 0.05, 1.0)
         elif sink.severity == "medium":
-            base = max(base - 0.1, 0.1)
+            base = max(base - 0.05, 0.1)
         if len(state.path) > 10:
             base = max(base - 0.1, 0.1)
         return round(base, 2)

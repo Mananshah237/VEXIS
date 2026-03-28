@@ -259,6 +259,7 @@ class LLMClient:
             return {"error": str(e)}
 
     def _parse_json(self, content: str) -> dict[str, Any]:
+        import re
         content = content.strip()
         try:
             if "```json" in content:
@@ -267,6 +268,16 @@ class LLMClient:
                 content = content.split("```")[1].split("```")[0].strip()
             return json.loads(content)
         except json.JSONDecodeError as e:
+            # Recover from LLMs that embed Python triple-quoted strings inside JSON.
+            # Pattern: {"script": """...""", "description": "..."}
+            m = re.search(r'"script"\s*:\s*"""(.*?)"""', content, re.DOTALL)
+            if m:
+                script_text = m.group(1)
+                desc_m = re.search(r'"description"\s*:\s*"([^"]*)"', content)
+                return {
+                    "script": script_text,
+                    "description": desc_m.group(1) if desc_m else "",
+                }
             log.error("llm.json_parse_error", error=str(e), raw=content[:200])
             return {"error": "JSON parse failed", "raw": content[:500]}
 
