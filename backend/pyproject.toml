@@ -32,6 +32,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# semgrep is a heavy optional dependency — install with: pip install vexis-backend[semgrep]
+# or separately: pip install "semgrep>=1.50.0"
+semgrep = [
+    "semgrep>=1.50.0",
+]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
