@@ -462,8 +462,14 @@ async def _run_scan_impl(scan_id: str) -> None:
                 return await disc.run(parsed_files, source_path)
 
             async def _run_semgrep_task():
-                from app.analysis.semgrep_runner import run_semgrep, compute_differential
-                sg_findings = await run_semgrep(source_path)
+                from app.analysis.semgrep_runner import run_semgrep, compute_differential, DifferentialResult
+                try:
+                    sg_findings = await run_semgrep(source_path)
+                except FileNotFoundError:
+                    result = compute_differential(all_findings, [])
+                    result.semgrep_available = False
+                    result.semgrep_error = "Semgrep is not installed."
+                    return result
                 return compute_differential(all_findings, sg_findings)
 
             await _broadcast(scan_id, "reasoning", 0.91,

@@ -68,15 +68,29 @@ class DifferentialResult:
 
 
 async def run_semgrep(scan_path: str, timeout: float = 60.0) -> list[SemgrepFinding]:
-    """Run semgrep --config=auto on scan_path, return parsed findings."""
+    """Run semgrep on scan_path using OSS language packs (no auth required).
+
+    Uses p/python + p/javascript instead of --config=auto because auto requires
+    Semgrep authentication in v1.56+. The OSS packs cover all languages VEXIS scans.
+
+    Exit codes:
+      0 — OK, no findings
+      1 — findings found
+      2 — partial success (some files failed to parse) — still returns findings
+      3+ — fatal error
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "semgrep", "--config=auto", "--json", "--timeout=30",
+            "semgrep",
+            "--config=p/python",
+            "--config=p/javascript",
+            "--json",
+            "--timeout=30",
             "--no-git-ignore",
             scan_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "SEMGREP_SEND_METRICS": "off"},
+            env={**os.environ, "SEMGREP_SEND_METRICS": "off", "SEMGREP_VERSION_CHECK_TIMEOUT": "0"},
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -84,13 +98,14 @@ async def run_semgrep(scan_path: str, timeout: float = 60.0) -> list[SemgrepFind
         return []
     except FileNotFoundError:
         log.info("semgrep.not_installed")
-        return []
+        raise  # re-raise so caller can set semgrep_available=False
     except Exception as e:
         log.warning("semgrep.failed", error=str(e))
         return []
 
-    if proc.returncode not in (0, 1):  # semgrep exits 1 when findings exist
-        log.warning("semgrep.error", stderr=stderr.decode()[:300])
+    # 0=ok/no findings, 1=findings found, 2=partial (some files failed to parse)
+    if proc.returncode not in (0, 1, 2):
+        log.warning("semgrep.error", returncode=proc.returncode, stderr=stderr.decode()[:300])
         return []
 
     try:

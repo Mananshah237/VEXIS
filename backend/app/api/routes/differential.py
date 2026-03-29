@@ -58,7 +58,11 @@ async def get_differential(
     semgrep_error = None
 
     if source_path and os.path.isdir(source_path):
-        semgrep_findings = await run_semgrep(source_path)
+        try:
+            semgrep_findings = await run_semgrep(source_path)
+        except FileNotFoundError:
+            semgrep_available = False
+            semgrep_error = "Semgrep is not installed on the server."
     else:
         semgrep_available = False
         semgrep_error = "Source path no longer available (ephemeral scan). Re-scan to enable differential."
