@@ -144,7 +144,7 @@ class LLMClient:
 
         if settings.ollama_base_url:
             result = await self._call_ollama(system, full_user)
-            if result is not None:
+            if result is not None and "error" not in result:
                 missing = self._validate_schema(result, schema)
                 if missing:
                     retry_user = (
@@ -157,8 +157,9 @@ class LLMClient:
 
         if settings.anthropic_api_key:
             result = await self._call_anthropic(system, full_user)
-            result = self._fill_defaults(result, schema)
-            await self._set_cached(cache_key, result)
+            if "error" not in result:
+                result = self._fill_defaults(result, schema)
+                await self._set_cached(cache_key, result)
             return result
 
         log.error("llm.no_provider")

@@ -104,7 +104,8 @@ async def _run_scan_impl(scan_id: str) -> None:
             return
 
         try:
-            await _update_status(db, scan, ScanStatus.PARSING)
+            scan.started_at = datetime.utcnow()
+            await _update_status(db, scan, ScanStatus.PARSING, 0.05)
             await _broadcast(scan_id, "parsing", 0.1, "Fetching source code...")
 
             source_path = await _fetch_source(scan)
@@ -217,7 +218,7 @@ async def _run_scan_impl(scan_id: str) -> None:
                 + (f" ({len(skipped_large)} large files skipped)" if skipped_large else "")
                 + (f" ({incremental_skipped} unchanged, incremental)" if incremental_skipped else "")
             )
-            await _update_status(db, scan, ScanStatus.TAINT_ANALYSIS)
+            await _update_status(db, scan, ScanStatus.TAINT_ANALYSIS, 0.2)
 
             from app.ingestion.parser import CodeParser
             from app.ingestion.pdg_builder import PDGBuilder
@@ -249,7 +250,7 @@ async def _run_scan_impl(scan_id: str) -> None:
             await db.commit()
 
             if not parsed_files:
-                await _update_status(db, scan, ScanStatus.COMPLETE)
+                await _update_status(db, scan, ScanStatus.COMPLETE, 1.0)
                 scan.completed_at = datetime.utcnow()
                 await db.commit()
                 await _broadcast(scan_id, "complete", 1.0, "No Python files found")
@@ -334,7 +335,7 @@ async def _run_scan_impl(scan_id: str) -> None:
                 pass
 
             if taint_paths:
-                await _update_status(db, scan, ScanStatus.REASONING)
+                await _update_status(db, scan, ScanStatus.REASONING, 0.55)
                 await _broadcast(
                     scan_id, "reasoning", 0.55,
                     f"AI analyzing {len(taint_paths)} path{'s' if len(taint_paths) != 1 else ''}"
@@ -650,7 +651,7 @@ async def _run_scan_impl(scan_id: str) -> None:
                 "exploit_scripts_generated": exploit_count if not isinstance(exploit_count, BaseException) else 0,
             }
             await db.commit()
-            await _update_status(db, scan, ScanStatus.COMPLETE)
+            await _update_status(db, scan, ScanStatus.COMPLETE, 1.0)
             scan.completed_at = datetime.utcnow()
             await db.commit()
 
@@ -718,8 +719,10 @@ async def _run_cross_file(
     return paths
 
 
-async def _update_status(db, scan: Scan, status: ScanStatus) -> None:
+async def _update_status(db, scan: Scan, status: ScanStatus, progress: float | None = None) -> None:
     scan.status = status
+    if progress is not None:
+        scan.progress = progress
     await db.commit()
 
 
@@ -744,7 +747,8 @@ async def _fetch_source(scan: Scan) -> str:
                 filename = parts[i].strip()
                 content = parts[i + 1]
                 safe_name = Path(filename).name
-                if not safe_name.endswith(".py"):
+                _supported_exts = {".py", ".js", ".ts", ".jsx", ".tsx"}
+                if not any(safe_name.endswith(ext) for ext in _supported_exts):
                     safe_name += ".py"
                 file_path = os.path.join(tmp_dir, safe_name)
                 with open(file_path, "w", encoding="utf-8") as fh:

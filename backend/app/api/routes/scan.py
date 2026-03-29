@@ -29,14 +29,26 @@ async def create_scan(
             ),
         )
 
+    # Validate GitHub URL format before creating DB record (avoids orphaned scan rows)
+    if body.source_type == "github_url":
+        from app.core.git_ops import _validate_repo_url
+        try:
+            _validate_repo_url(body.source)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # Raw code size guard — reject oversized payloads before creating DB record
+    if body.source_type == "raw_code" and len(body.source) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Raw code payload exceeds 10 MB limit.")
+
     # Rate limiting for authenticated users
     if current_user:
-        from app.core.rate_limiter import check_rate_limit
+        from app.core.rate_limiter import check_rate_limit, FREE_TIER_DAILY_LIMIT
         allowed, remaining = await check_rate_limit(str(current_user["id"]))
         if not allowed:
             raise HTTPException(
                 status_code=429,
-                detail=f"Daily scan limit reached ({3} scans/day for free tier). Upgrade for unlimited scans.",
+                detail=f"Daily scan limit reached ({FREE_TIER_DAILY_LIMIT} scans/day for free tier). Upgrade for unlimited scans.",
                 headers={"X-RateLimit-Remaining": "0"},
             )
 
