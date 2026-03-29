@@ -29,8 +29,12 @@ Pre-launch verification checklist for the VEXIS v0.1.0 public release.
 - [ ] `CORS_ORIGINS` restricted to frontend origin (not `*`)
 - [ ] `JWT_SECRET` is not the default `dev-secret-change-in-production`
 - [ ] `MINIO_SECRET_KEY` is not the default `vexis_dev_password`
+- [ ] `NEXTAUTH_SECRET` is a strong random value, not the dev default
 - [ ] Rate limiting verified: 4th scan in 24h returns HTTP 429
-- [ ] `/api/v1/scan/{id}` returns 404 for cross-user access attempts
+- [ ] **IDOR check**: create a scan as user A, request it unauthenticated → `404`
+- [ ] **IDOR check**: create a scan as user A, request it as user B → `404`
+- [ ] `/api/v1/scans/recent` unauthenticated returns only anonymous scans, not user A's private scans
+- [ ] PDF cache check: `GET /api/v1/report/{id}` on first call streams PDF directly (no 302→404)
 
 ## Core scan functionality
 

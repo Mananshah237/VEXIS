@@ -1,10 +1,10 @@
 # VEXIS — Project Status
 
-Last updated: 2026-03-28
+Last updated: 2026-03-29
 
 ---
 
-## Current state: Sprint 8 complete
+## Current state: Sprint 9 complete
 
 All features shipped and tested. System is production-ready for self-hosted deployment.
 
@@ -108,6 +108,38 @@ All CCSM false-positive checks pass (parameterized queries, shlex.quote, html.es
 
 ---
 
+## Security patches (Sprint 9)
+
+### IDOR / unauthenticated access bypass — fixed
+**Severity:** Critical
+**Root cause:** All ownership checks used `if current_user and scan.user_id and ...` — when `current_user` is `None` (unauthenticated), the entire condition short-circuits to `False` and access is granted unconditionally.
+**Impact:** Unauthenticated attackers could read private scans, findings, exploit scripts, PDF reports, and mutate triage status on any user's data.
+
+**Fix applied across 12 endpoints in 7 files:**
+
+| File | Endpoints fixed |
+|------|----------------|
+| `scan.py` | `get_scan`, `download_code_snapshot`, `compare_scans`, `list_scan_artifacts` |
+| `findings.py` | `list_findings`, `get_finding` |
+| `triage.py` | `triage_finding` |
+| `exploit.py` | `download_exploit`, `generate_exploit` |
+| `reports.py` | `_load_scan_and_findings` (shared helper) |
+| `differential.py` | `get_differential` |
+| `stats.py` | `get_stats`, `get_recent_scans` (added `get_current_user` dep + user-scoped queries) |
+
+**New invariant:** A scan with `user_id IS NOT NULL` can only be accessed by the authenticated user whose `id` matches. Anonymous scans (`user_id IS NULL`) are publicly accessible. Unauthenticated users see only anonymous scans in `/scans/recent` and `/stats`.
+
+### PDF download — fixed
+Presigned MinIO URL was generated for non-existent objects, causing 302→404. Added `object_exists()` check before redirect; first request now builds and streams PDF directly.
+
+### Frontend auth
+- GitHub OAuth is optional — app works fully without `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` set
+- All routes open to guests (middleware matcher set to `[]`)
+- `NEXTAUTH_SECRET` auto-seeded with a dev default if not set
+- Exploit script truncation fixed: Ollama `num_predict` raised from 512 → 2048; added minimum-length guard to fall back to template on truncated LLM output
+
+---
+
 ## Known limitations
 
 1. **Graph folding latency vs benefit**: real PDGs use dual STATEMENT+ASSIGNMENT nodes per line which prevents most passthrough folding. The optimization activates on simpler chains; overhead is O(n) per PDG which is small.
@@ -136,6 +168,10 @@ VEXIS_DANGER_THRESHOLD=0.15
 ## Recent commits
 
 ```
+(Sprint 9)
+fix: critical IDOR auth bypass across all API endpoints; PDF cache; exploit truncation
+(Sprint 8)
+3ddfcf3  feat: inline exploit scripts on finding cards; update all docs to Sprint 8
 357a893  feat: CCSM continuous sanitizer scoring, Graph Folding, exploit/presigned URL fixes
 946ffc1  feat: wire exploit gen, Pass 4, and Semgrep into scan pipeline
 90e9368  feat: differential Semgrep analysis

@@ -93,6 +93,18 @@ async def upload_artifact(scan_id: str, artifact_name: str, data: dict | list) -
         return False
 
 
+def object_exists(bucket: str, object_name: str) -> bool:
+    """Return True if the object exists in the bucket."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.stat_object(bucket, object_name)
+        return True
+    except Exception:
+        return False
+
+
 def get_signed_url(bucket: str, object_name: str, expires_seconds: int = 3600) -> Optional[str]:
     """Generate a presigned GET URL valid for expires_seconds.
 

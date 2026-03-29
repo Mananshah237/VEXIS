@@ -27,8 +27,9 @@ async def triage_finding(
     # Verify caller owns the scan this finding belongs to
     scan_result = await db.execute(select(Scan).where(Scan.id == finding.scan_id))
     scan = scan_result.scalar_one_or_none()
-    if current_user and scan and scan.user_id and scan.user_id != current_user["id"]:
-        raise HTTPException(status_code=404, detail="Finding not found")
+    if scan and scan.user_id is not None:
+        if not current_user or str(scan.user_id) != str(current_user["id"]):
+            raise HTTPException(status_code=404, detail="Finding not found")
 
     finding.triage_status = body.status
     finding.triage_notes = body.notes

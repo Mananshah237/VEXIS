@@ -27,8 +27,9 @@ async def get_differential(
     scan = scan_result.scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if current_user and scan.user_id and scan.user_id != current_user["id"]:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.user_id is not None:
+        if not current_user or str(scan.user_id) != str(current_user["id"]):
+            raise HTTPException(status_code=404, detail="Scan not found")
 
     # Return cached differential if available
     cached = (scan.stats or {}).get("differential")

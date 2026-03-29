@@ -1,10 +1,5 @@
-export { default } from "next-auth/middleware";
-
+// Auth is optional — all routes are accessible without login.
+// Re-enable the matcher below to enforce GitHub OAuth in production.
 export const config = {
-  matcher: [
-    "/dashboard/:path*",
-    "/scan/:path*",
-    "/reports/:path*",
-    "/settings/:path*",
-  ],
+  matcher: [],
 };

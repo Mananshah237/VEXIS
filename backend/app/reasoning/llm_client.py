@@ -222,7 +222,7 @@ class LLMClient:
                 {"role": "user", "content": user},
             ],
             "stream": False,
-            "options": {"temperature": 0.1, "num_predict": 512},
+            "options": {"temperature": 0.1, "num_predict": 2048},
         }
         try:
             async with httpx.AsyncClient(timeout=90.0) as client:

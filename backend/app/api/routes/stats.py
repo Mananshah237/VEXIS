@@ -6,18 +6,34 @@ from app.database import get_db
 from app.models.scan import Scan
 from app.models.finding import Finding
 from app.models.schemas import ScanResponse
+from app.api.deps import get_current_user
 
 router = APIRouter()
 
 
 @router.get("/stats")
-async def get_stats(db: AsyncSession = Depends(get_db)) -> dict:
-    total_scans = await db.scalar(select(func.count(Scan.id)))
-    total_findings = await db.scalar(select(func.count(Finding.id)))
-    critical = await db.scalar(select(func.count(Finding.id)).where(Finding.severity == "critical"))
-    high = await db.scalar(select(func.count(Finding.id)).where(Finding.severity == "high"))
-    medium = await db.scalar(select(func.count(Finding.id)).where(Finding.severity == "medium"))
-    low = await db.scalar(select(func.count(Finding.id)).where(Finding.severity == "low"))
+async def get_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict | None = Depends(get_current_user),
+) -> dict:
+    # Scope to the caller's scans (or anonymous-only scans if unauthenticated)
+    if current_user:
+        scan_filter = Scan.user_id == current_user["id"]
+        finding_filter = Finding.scan_id.in_(
+            select(Scan.id).where(Scan.user_id == current_user["id"])
+        )
+    else:
+        scan_filter = Scan.user_id.is_(None)
+        finding_filter = Finding.scan_id.in_(
+            select(Scan.id).where(Scan.user_id.is_(None))
+        )
+
+    total_scans = await db.scalar(select(func.count(Scan.id)).where(scan_filter))
+    total_findings = await db.scalar(select(func.count(Finding.id)).where(finding_filter))
+    critical = await db.scalar(select(func.count(Finding.id)).where(finding_filter, Finding.severity == "critical"))
+    high = await db.scalar(select(func.count(Finding.id)).where(finding_filter, Finding.severity == "high"))
+    medium = await db.scalar(select(func.count(Finding.id)).where(finding_filter, Finding.severity == "medium"))
+    low = await db.scalar(select(func.count(Finding.id)).where(finding_filter, Finding.severity == "low"))
     return {
         "total_scans": total_scans or 0,
         "total_findings": total_findings or 0,
@@ -37,24 +53,25 @@ async def get_recent_scans(
     status: str | None = Query(None),
     min_severity: str | None = Query(None, description="Return only scans with at least one finding at this severity"),
     db: AsyncSession = Depends(get_db),
+    current_user: dict | None = Depends(get_current_user),
 ) -> dict:
-    """Return paginated scan history with per-scan finding counts.
+    """Return paginated scan history scoped to the caller.
 
-    Query params:
-    - limit / page: pagination
-    - status: filter by scan status (e.g. 'complete', 'failed')
-    - min_severity: 'critical' | 'high' | 'medium' | 'low' — filters to scans
-      that have at least one finding at that severity or above
+    Authenticated users see only their own scans.
+    Unauthenticated users see only anonymous scans (user_id IS NULL).
     """
     _SEV_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
-    # Base query
-    q = select(Scan)
+    if current_user:
+        user_filter = Scan.user_id == current_user["id"]
+    else:
+        user_filter = Scan.user_id.is_(None)
+
+    q = select(Scan).where(user_filter)
     if status:
         q = q.where(Scan.status == status)
 
-    # Count total matching scans (for pagination metadata)
-    count_q = select(func.count(Scan.id))
+    count_q = select(func.count(Scan.id)).where(user_filter)
     if status:
         count_q = count_q.where(Scan.status == status)
     total = await db.scalar(count_q) or 0
@@ -63,7 +80,6 @@ async def get_recent_scans(
     scan_result = await db.execute(q)
     scans = list(scan_result.scalars().all())
 
-    # Batch-fetch finding counts and max severity per scan
     scan_ids = [s.id for s in scans]
     counts: dict = {}
     max_severities: dict = {}
@@ -92,7 +108,6 @@ async def get_recent_scans(
         for s in scans
     ]
 
-    # Apply min_severity filter post-fetch (simpler than a subquery join)
     if min_severity and min_severity in _SEV_RANK:
         threshold = _SEV_RANK[min_severity]
         result_scans = [

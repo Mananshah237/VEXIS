@@ -40,8 +40,9 @@ async def _load_scan_and_findings(
     scan = result.scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if current_user and scan.user_id and scan.user_id != current_user["id"]:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.user_id is not None:
+        if not current_user or str(scan.user_id) != str(current_user["id"]):
+            raise HTTPException(status_code=404, detail="Scan not found")
     if scan.status != "complete":
         raise HTTPException(status_code=409, detail=f"Scan is not complete (status: {scan.status})")
 
@@ -67,12 +68,14 @@ async def get_pdf_report(
 
     object_name = f"reports/{scan_id}/report.pdf"
 
-    # Try to serve from MinIO cache first
+    # Try to serve from MinIO cache first (only if object actually exists)
     try:
-        url = get_signed_url(_PDF_CACHE_BUCKET, object_name, expires_seconds=3600)
-        if url:
-            from fastapi.responses import RedirectResponse
-            return RedirectResponse(url=url, status_code=302)
+        from app.core.storage import object_exists
+        if object_exists(_PDF_CACHE_BUCKET, object_name):
+            url = get_signed_url(_PDF_CACHE_BUCKET, object_name, expires_seconds=3600)
+            if url:
+                from fastapi.responses import RedirectResponse
+                return RedirectResponse(url=url, status_code=302)
     except Exception:
         pass  # cache miss — generate below
 

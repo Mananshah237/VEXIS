@@ -27,8 +27,9 @@ async def list_findings(
     scan = scan_result.scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if current_user and scan.user_id and scan.user_id != current_user["id"]:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.user_id is not None:
+        if not current_user or str(scan.user_id) != str(current_user["id"]):
+            raise HTTPException(status_code=404, detail="Scan not found")
 
     q = select(Finding).where(Finding.scan_id == uuid.UUID(scan_id))
     if severity:
@@ -59,6 +60,7 @@ async def get_finding(
     # Verify ownership through the parent scan
     scan_result = await db.execute(select(Scan).where(Scan.id == finding.scan_id))
     scan = scan_result.scalar_one_or_none()
-    if current_user and scan and scan.user_id and scan.user_id != current_user["id"]:
-        raise HTTPException(status_code=404, detail="Finding not found")
+    if scan and scan.user_id is not None:
+        if not current_user or str(scan.user_id) != str(current_user["id"]):
+            raise HTTPException(status_code=404, detail="Finding not found")
     return FindingDetailResponse.model_validate(finding)

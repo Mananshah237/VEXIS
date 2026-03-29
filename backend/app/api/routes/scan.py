@@ -63,8 +63,9 @@ async def get_scan(
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     # If user is authenticated and scan belongs to someone else → 404 (not 403, to avoid enumeration)
-    if current_user and scan.user_id and scan.user_id != current_user["id"]:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.user_id is not None:
+        if not current_user or str(scan.user_id) != str(current_user["id"]):
+            raise HTTPException(status_code=404, detail="Scan not found")
     return ScanResponse.model_validate(scan)
 
 
@@ -79,8 +80,9 @@ async def download_code_snapshot(
     scan = result.scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if current_user and scan.user_id and scan.user_id != current_user["id"]:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.user_id is not None:
+        if not current_user or str(scan.user_id) != str(current_user["id"]):
+            raise HTTPException(status_code=404, detail="Scan not found")
     from app.core.storage import get_signed_url, BUCKET_CODE
     url = get_signed_url(BUCKET_CODE, f"{scan_id}/source.py")
     if not url:
@@ -107,8 +109,9 @@ async def compare_scans(
         s = r.scalar_one_or_none()
         if not s:
             raise HTTPException(status_code=404, detail=f"Scan {sid} not found")
-        if current_user and s.user_id and s.user_id != current_user["id"]:
-            raise HTTPException(status_code=404, detail=f"Scan {sid} not found")
+        if s.user_id is not None:
+            if not current_user or str(s.user_id) != str(current_user["id"]):
+                raise HTTPException(status_code=404, detail=f"Scan {sid} not found")
         return s
 
     from app.models.finding import Finding as FindingModel
@@ -172,8 +175,9 @@ async def list_scan_artifacts(
     scan = result.scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if current_user and scan.user_id and scan.user_id != current_user["id"]:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.user_id is not None:
+        if not current_user or str(scan.user_id) != str(current_user["id"]):
+            raise HTTPException(status_code=404, detail="Scan not found")
     from app.core.storage import list_objects, get_signed_url, BUCKET_ARTIFACTS
     objects = list_objects(BUCKET_ARTIFACTS, prefix=f"{scan_id}/")
     urls = {

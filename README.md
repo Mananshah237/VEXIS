@@ -39,7 +39,7 @@
 
 - **Differential Semgrep analysis.** Every scan runs Semgrep in parallel and shows a three-column breakdown: VEXIS-only, Semgrep-only, and confirmed-by-both. VEXIS consistently finds cross-file, chain, and second-order findings that Semgrep misses entirely.
 
-- **GitHub OAuth + API key auth.** Multi-tenant with per-user scan isolation, rate limiting (3 scans/day free tier), and API key generation for programmatic access.
+- **GitHub OAuth + API key auth.** Multi-tenant with per-user scan isolation, rate limiting (3 scans/day free tier), and API key generation for programmatic access. GitHub OAuth is optional — the app runs fully in guest mode without credentials configured.
 
 - **PDF report generation.** One-click PDF export via WeasyPrint: cover page with risk score gauge, executive summary, per-finding taint paths + PoC + AI analysis, OWASP mapping, and glossary.
 
@@ -355,6 +355,14 @@ vexis/
         ├── app/              # Next.js pages (landing, dashboard, scan/[id], finding/[fid])
         └── components/       # AttackFlowGraph (D3), ScanProgress (WebSocket)
 ```
+
+---
+
+## Security model
+
+- **Anonymous scans** (`user_id IS NULL`): created when no user is authenticated. Publicly readable by anyone. This is the default for local dev / demos.
+- **Private scans** (`user_id IS NOT NULL`): created when the user is signed in via GitHub OAuth. Strictly scoped to the owning user — any other caller (authenticated or not) receives `404`.
+- All 12 ownership-check endpoints enforce this invariant. The `/scans/recent` and `/stats` endpoints are scoped to the caller's own scans only.
 
 ---
 
