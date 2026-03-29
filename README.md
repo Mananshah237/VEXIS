@@ -360,6 +360,11 @@ vexis/
 
 ## Security model
 
+### Scan source allowlist
+`POST /api/v1/scan` only accepts `source_type: "github_url"` or `source_type: "raw_code"`. Requests with `"directory"` or `"file_upload"` are rejected with HTTP 400. This prevents an attacker from scanning arbitrary server-side paths (e.g. `/etc`, `/app`) and reading back source code snippets through the findings API.
+
+The CLI bundles local directories into a `raw_code` payload before sending — the server never touches the local filesystem.
+
 - **Anonymous scans** (`user_id IS NULL`): created when no user is authenticated. Publicly readable by anyone. This is the default for local dev / demos.
 - **Private scans** (`user_id IS NOT NULL`): created when the user is signed in via GitHub OAuth. Strictly scoped to the owning user — any other caller (authenticated or not) receives `404`.
 - All 12 ownership-check endpoints enforce this invariant. The `/scans/recent` and `/stats` endpoints are scoped to the caller's own scans only.

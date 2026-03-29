@@ -19,6 +19,16 @@ async def create_scan(
     db: AsyncSession = Depends(get_db),
     current_user: dict | None = Depends(get_current_user),
 ) -> ScanResponse:
+    # Block server-side path scanning — only github_url and raw_code are safe
+    if body.source_type not in ("github_url", "raw_code"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid source_type. Only 'github_url' and 'raw_code' are accepted via the API. "
+                "Local path scanning ('directory', 'file_upload') is disabled to prevent server-side file read."
+            ),
+        )
+
     # Rate limiting for authenticated users
     if current_user:
         from app.core.rate_limiter import check_rate_limit

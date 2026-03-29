@@ -1,10 +1,10 @@
 # VEXIS — Project Status
 
-Last updated: 2026-03-29
+Last updated: 2026-03-29 (Sprint 10)
 
 ---
 
-## Current state: Sprint 9 complete
+## Current state: Sprint 10 complete
 
 All features shipped and tested. System is production-ready for self-hosted deployment.
 
@@ -108,6 +108,28 @@ All CCSM false-positive checks pass (parameterized queries, shlex.quote, html.es
 
 ---
 
+## Security patches (Sprint 10)
+
+### Arbitrary local directory read / SSRF via scan source — fixed
+**Severity:** Critical
+**Root cause:** `POST /api/v1/scan` accepted `source_type: "directory"` and `source_type: "file_upload"` with arbitrary server-side paths. The orchestrator would scan `/etc`, `/app`, or any readable path and expose source code snippets in findings.
+
+**Fix:**
+- `scan.py`: Added allowlist guard at the top of `create_scan` — only `github_url` and `raw_code` are accepted. Any other `source_type` is rejected with HTTP 400.
+- `cli/vexis_cli.py`: CLI no longer sends local paths to the server. Local files/directories are now bundled into a `raw_code` payload (using `=== FILE: name ===` separators) before sending — identical to how the GitHub Action works. A 2 MB character cap prevents oversized payloads.
+
+**Verification:**
+```bash
+# Must return 400
+curl -s -X POST http://localhost:8000/api/v1/scan \
+  -H "Content-Type: application/json" \
+  -d '{"source_type":"directory","source":"/etc"}' | python3 -m json.tool
+
+# Expected: {"detail": "Invalid source_type. Only 'github_url' and 'raw_code' are accepted..."}
+```
+
+---
+
 ## Security patches (Sprint 9)
 
 ### IDOR / unauthenticated access bypass — fixed
@@ -168,6 +190,9 @@ VEXIS_DANGER_THRESHOLD=0.15
 ## Recent commits
 
 ```
+(Sprint 10)
+fix: SSRF/local path scan via source_type allowlist; CLI bundles local files as raw_code
+fix: harden .gitignore — backend/.env, .claude/ excluded; merge main+master
 (Sprint 9)
 fix: critical IDOR auth bypass across all API endpoints; PDF cache; exploit truncation
 (Sprint 8)

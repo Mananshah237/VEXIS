@@ -35,6 +35,9 @@ Pre-launch verification checklist for the VEXIS v0.1.0 public release.
 - [ ] **IDOR check**: create a scan as user A, request it as user B → `404`
 - [ ] `/api/v1/scans/recent` unauthenticated returns only anonymous scans, not user A's private scans
 - [ ] PDF cache check: `GET /api/v1/report/{id}` on first call streams PDF directly (no 302→404)
+- [ ] **SSRF check**: `POST /api/v1/scan` with `source_type=directory` returns HTTP 400
+- [ ] **SSRF check**: `POST /api/v1/scan` with `source_type=file_upload` returns HTTP 400
+- [ ] CLI local scan bundles files as `raw_code` — does not send filesystem paths to the server
 
 ## Core scan functionality
 
