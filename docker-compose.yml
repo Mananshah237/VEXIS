@@ -27,12 +27,10 @@ services:
         condition: service_started
     volumes:
       - ./backend:/app
+      - backend_venv:/app/.venv
     command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     security_opt:
       - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp
 
   celery_worker:
     build: ./backend
@@ -51,12 +49,10 @@ services:
         condition: service_started
     volumes:
       - ./backend:/app
+      - backend_venv:/app/.venv
     command: uv run celery -A app.celery_app worker --loglevel=info --concurrency=2
     security_opt:
       - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp
 
   frontend:
     build: ./frontend
@@ -113,3 +109,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  backend_venv:
