@@ -28,6 +28,11 @@ services:
     volumes:
       - ./backend:/app
     command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
 
   celery_worker:
     build: ./backend
@@ -47,6 +52,11 @@ services:
     volumes:
       - ./backend:/app
     command: uv run celery -A app.celery_app worker --loglevel=info --concurrency=2
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
 
   frontend:
     build: ./frontend
@@ -64,6 +74,8 @@ services:
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
+    security_opt:
+      - no-new-privileges:true
 
   postgres:
     image: postgres:16-alpine

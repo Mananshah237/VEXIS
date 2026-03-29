@@ -21,4 +21,11 @@ RUN uv sync --no-dev
 
 COPY . .
 
+# Create non-root user with a home dir for tool caches
+RUN groupadd -r vexis && useradd -r -g vexis -d /home/vexis -s /bin/false vexis \
+    && mkdir -p /home/vexis \
+    && chown -R vexis:vexis /app /home/vexis
+
+USER vexis
+
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
