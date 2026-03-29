@@ -5,6 +5,7 @@ import { useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { ScanProgress } from "@/components/ScanProgress";
+import { useSession } from "next-auth/react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -42,6 +43,9 @@ export default function ScanResultsPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const apiBase = process.env.NEXT_PUBLIC_API_URL;
+  const { data: session } = useSession();
+  const tokenQuery = (session as any)?.accessToken ? `?token=${(session as any).accessToken}` : "";
+
   const [activeTab, setActiveTab] = useState<"findings" | "semgrep">("findings");
   const [expandedExploits, setExpandedExploits] = useState<Set<string>>(new Set());
   const [copiedExploit, setCopiedExploit] = useState<string | null>(null);
@@ -243,7 +247,7 @@ export default function ScanResultsPage() {
               ↺ Re-scan (incremental)
             </button>
             <a
-              href={`${apiBase}/api/v1/report/${id}`}
+              href={`${apiBase}/api/v1/report/${id}${tokenQuery}`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-4 py-2 bg-bg-secondary border border-border rounded-lg text-sm text-text-secondary hover:border-accent-primary hover:text-accent-primary transition-colors"
@@ -369,7 +373,7 @@ export default function ScanResultsPage() {
                                   {copiedExploit === f.id ? "✓ Copied" : "Copy"}
                                 </button>
                                 <a
-                                  href={`${apiBase}/api/v1/finding/${f.id}/exploit`}
+                                  href={`${apiBase}/api/v1/finding/${f.id}/exploit${tokenQuery}`}
                                   download={`exploit_${f.id.slice(0, 8)}.py`}
                                   onClick={(e) => e.stopPropagation()}
                                   className="text-xs text-text-muted hover:text-text-primary transition-colors px-2 py-0.5 rounded border border-border/50 hover:border-border"

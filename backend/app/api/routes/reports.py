@@ -83,13 +83,17 @@ async def get_pdf_report(
     try:
         from app.reporting.pdf_builder import build_pdf
         pdf_bytes = build_pdf(scan, findings)
-    except ImportError:
-        raise HTTPException(
-            status_code=501,
-            detail="WeasyPrint is not installed. Run: pip install weasyprint",
-        )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
+        import structlog
+        structlog.get_logger().warning("pdf_generation_failed", error=str(exc))
+        # WeasyPrint unavailable (e.g., Windows without GTK/Cairo) — serve HTML inline.
+        # Calling build_html directly avoids a redirect that would drop the auth token.
+        try:
+            from app.reporting.pdf_builder import build_html
+            html = build_html(scan, findings)
+            return Response(content=html, media_type="text/html")
+        except Exception as html_exc:
+            raise HTTPException(status_code=500, detail=f"Report generation failed: {html_exc}")
 
     # Cache in MinIO (best-effort — don't fail the request if storage is unavailable)
     try:

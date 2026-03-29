@@ -70,18 +70,15 @@ class DifferentialResult:
 async def run_semgrep(scan_path: str, timeout: float = 60.0) -> list[SemgrepFinding]:
     """Run semgrep --config=auto on scan_path, return parsed findings."""
     try:
-        proc = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
-                "semgrep", "--config=auto", "--json", "--timeout=30",
-                "--no-git-ignore",
-                scan_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "SEMGREP_SEND_METRICS": "off"},
-            ),
-            timeout=timeout,
+        proc = await asyncio.create_subprocess_exec(
+            "semgrep", "--config=auto", "--json", "--timeout=30",
+            "--no-git-ignore",
+            scan_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "SEMGREP_SEND_METRICS": "off"},
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         log.warning("semgrep.timeout", timeout=timeout)
         return []

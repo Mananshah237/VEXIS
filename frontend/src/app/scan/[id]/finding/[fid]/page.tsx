@@ -5,12 +5,14 @@ import { useState } from "react";
 import useSWR, { mutate as globalMutate } from "swr";
 import Link from "next/link";
 import { AttackFlowGraph } from "@/components/AttackFlowGraph";
+import { useSession } from "next-auth/react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 export default function FindingDetailPage() {
   const { id, fid } = useParams<{ id: string; fid: string }>();
   const apiBase = process.env.NEXT_PUBLIC_API_URL;
+  const { data: session } = useSession();
   const [generatingExploit, setGeneratingExploit] = useState(false);
   const [exploitCopied, setExploitCopied] = useState(false);
 
@@ -246,7 +248,7 @@ export default function FindingDetailPage() {
                     {exploitCopied ? "Copied!" : "Copy"}
                   </button>
                   <a
-                    href={`${apiBase}/api/v1/finding/${fid}/exploit`}
+                    href={`${apiBase}/api/v1/finding/${fid}/exploit${(session as any)?.accessToken ? `?token=${(session as any).accessToken}` : ""}`}
                     download={`exploit_${fid.slice(0, 8)}.py`}
                     className="text-xs px-3 py-1.5 border border-border rounded-lg text-text-secondary hover:border-accent-primary hover:text-accent-primary transition-colors"
                   >

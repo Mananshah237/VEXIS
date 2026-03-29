@@ -534,7 +534,26 @@ async def _run_scan_impl(scan_id: str) -> None:
                     "semgrep_only": len(semgrep_diff.semgrep_only),
                     "overlap": len(semgrep_diff.overlap),
                 }
-                scan.stats = {**scan.stats, "semgrep_summary": diff_summary}
+                full_differential = {
+                    "semgrep_available": semgrep_diff.semgrep_available,
+                    "semgrep_error": getattr(semgrep_diff, "semgrep_error", None),
+                    "summary": diff_summary,
+                    "vexis_only": semgrep_diff.vexis_only,
+                    "semgrep_only": [
+                        {
+                            "rule_id": sf.rule_id,
+                            "file": sf.file,
+                            "line": sf.line,
+                            "message": sf.message,
+                            "severity": sf.severity,
+                            "vuln_class": sf.vuln_class,
+                            "cwe": sf.cwe,
+                        }
+                        for sf in semgrep_diff.semgrep_only
+                    ],
+                    "overlap": semgrep_diff.overlap,
+                }
+                scan.stats = {**scan.stats, "semgrep_summary": diff_summary, "differential": full_differential}
 
             log.info(
                 "post_pipeline.done",
