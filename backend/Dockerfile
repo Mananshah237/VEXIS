@@ -16,8 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install uv
 
-COPY pyproject.toml .
-RUN uv sync --no-dev
+# Place the uv-managed virtualenv OUTSIDE /app so the docker-compose bind mount
+# (./backend:/app) does not shadow the dependencies installed at build time.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev --no-install-project
 
 COPY . .
 

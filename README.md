@@ -103,19 +103,35 @@ VEXIS result: **CWE-89 CRITICAL** · Source: `rate_limiter.py:2` · Sink: `logge
 
 ## Quick start
 
+VEXIS runs with a **single command** — no manual `.env` editing required. The compose
+file ships safe local-dev defaults for every secret (MinIO/JWT/NextAuth), so the stack
+comes up out of the box. Create a `.env` only to override them:
+
 ```bash
-git clone https://github.com/you/vexis
-cd vexis
+git clone https://github.com/Mananshah237/VEXIS
+cd VEXIS
 
-# Add your Gemini API key
-echo "GOOGLE_API_KEY=your_key_here" >> backend/.env
+# Start everything (api, celery worker, frontend, postgres, redis, minio)
+docker compose up --build -d
 
-# Start everything
-docker compose up --build
-
-# Open browser
-open http://localhost:3000
+# Frontend:  http://localhost:3000
+# API:       http://localhost:8000/health   ->  {"status":"ok"}
 ```
+
+**Ports:** web **3000**, API **8000** (plus Postgres 5432, Redis 6379, MinIO 9000/9001).
+These don't collide with the sibling projects — AegisScan (3001/8001) and PhishNet
+(3002/8002) — so all three demos can run simultaneously.
+
+DB tables are auto-created on startup and the MinIO buckets are provisioned
+automatically — there is nothing else to run. **For AI reasoning passes**, add a key
+to `.env` (`GOOGLE_API_KEY=...`); without one, VEXIS still runs the full **taint
+engine** (verified: a Flask `request.args` → `cursor.execute` f-string is detected as
+`CWE-89 SQL Injection`, `taint_confidence=1.00`). For production, replace every
+dev secret in `.env` with strong random values.
+
+> **Notes for self-hosting:** the backend image places its uv virtualenv at `/opt/venv`
+> (outside the `./backend` bind mount) so dependencies aren't shadowed at runtime; the
+> compose file no longer carries the obsolete `version:` key.
 
 **Multi-file scan via API** (use `=== FILE: name.py ===` separators):
 
@@ -386,6 +402,26 @@ VEXIS_SCAN_TIMEOUT_SECONDS=600         # Per-scan timeout (default: 600)
 VEXIS_MAX_LLM_CALLS_PER_SCAN=100       # LLM call budget per scan (default: 100)
 VEXIS_DANGER_THRESHOLD=0.15            # CCSM early-termination threshold (default: 0.15)
 ```
+
+---
+
+## Optimization & improvement roadmap
+
+1. **Production image without bind-mounted source.** The dev compose mounts `./backend`
+   and runs `uvicorn --reload`. Add a `docker-compose.prod.yml` that drops the mount and
+   reload flag and runs multiple uvicorn workers behind the already-installed `/opt/venv`.
+2. **Ship a prod profile that runs Alembic** instead of `create_all()` at startup, so
+   schema changes are versioned (the migrations live in `backend/alembic/`).
+3. **Bundle `semgrep` as an opt-in profile.** It's an optional extra today; a
+   `docker compose --profile semgrep up` variant would enable the differential analysis
+   without bloating the default image.
+4. **Cache tree-sitter parses and PDGs** keyed by file SHA (the incremental manifest
+   already computes hashes) to speed re-scans of large repos.
+5. **Broaden sink coverage** for user-named DB handles (e.g. `conn.execute`) — currently
+   only well-known names like `cursor.execute`/`db.execute` are recognized (see
+   `status.md` → Known limitations).
+6. **Pin base images by digest** (`python:3.12-slim`, `node:20-alpine`, `postgres:16`)
+   for reproducible builds.
 
 ---
 

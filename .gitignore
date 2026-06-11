@@ -31,5 +31,7 @@ out/
 .DS_Store
 Thumbs.db
 
-# Claude Code local settings
+# Local tooling — never commit
 .claude/
+CLAUDE.md
+claude.md
