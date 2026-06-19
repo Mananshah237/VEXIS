@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import scan, findings, reports, triage, stats, auth, exploit, differential
+from app.api.routes import scan, findings, reports, triage, stats, auth, exploit, differential, autofix
 from app.api.ws import scan_ws
 from app.config import settings
 from app.database import engine, Base
@@ -22,12 +22,17 @@ log = structlog.get_logger()
 _SCHEMA_MIGRATIONS = [
     "ALTER TABLE findings ADD COLUMN IF NOT EXISTS chain_data JSONB",
     "ALTER TABLE findings ADD COLUMN IF NOT EXISTS exploit_script TEXT",
+    "ALTER TABLE findings ADD COLUMN IF NOT EXISTS autofix JSONB",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS github_token TEXT",
 ]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("VEXIS starting up", version="0.1.0")
+    log.info("VEXIS starting up", version="0.1.0", env=settings.env)
+    # Fail closed on weak/empty secrets outside dev (forgeable JWTs, plaintext
+    # storage). Raises RuntimeError → uvicorn aborts startup.
+    settings.validate_secrets()
     # Create tables if they don't exist (dev mode; use alembic in prod)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -67,6 +72,7 @@ app.include_router(scan_ws.router, tags=["websocket"])
 app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
 app.include_router(exploit.router, prefix="/api/v1", tags=["exploit"])
 app.include_router(differential.router, prefix="/api/v1", tags=["differential"])
+app.include_router(autofix.router, prefix="/api/v1", tags=["autofix"])
 
 
 @app.get("/health")

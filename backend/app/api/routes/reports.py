@@ -13,7 +13,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import require_user
 from app.core.storage import get_signed_url
 from app.database import get_db
 from app.models.finding import Finding
@@ -28,9 +28,9 @@ _PDF_CACHE_BUCKET = "scan-artifacts"
 async def _load_scan_and_findings(
     scan_id: str,
     db: AsyncSession,
-    current_user: dict | None,
+    current_user: dict,
 ) -> tuple[Scan, list[Finding]]:
-    """Fetch scan + findings, enforcing ownership when auth is present."""
+    """Fetch scan + findings, enforcing owner-only access."""
     try:
         uid = uuid.UUID(scan_id)
     except ValueError:
@@ -40,9 +40,8 @@ async def _load_scan_and_findings(
     scan = result.scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if scan.user_id is not None:
-        if not current_user or str(scan.user_id) != str(current_user["id"]):
-            raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.user_id is None or str(scan.user_id) != str(current_user["id"]):
+        raise HTTPException(status_code=404, detail="Scan not found")
     if scan.status != "complete":
         raise HTTPException(status_code=409, detail=f"Scan is not complete (status: {scan.status})")
 
@@ -57,7 +56,7 @@ async def _load_scan_and_findings(
 async def get_pdf_report(
     scan_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user),
+    current_user: dict = Depends(require_user),
 ) -> Response:
     """Generate a PDF report for a completed scan.
 
@@ -119,7 +118,7 @@ async def get_pdf_report(
 async def get_html_report(
     scan_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user),
+    current_user: dict = Depends(require_user),
 ) -> Response:
     """Return the rendered HTML for a scan report (preview / debugging)."""
     scan, findings = await _load_scan_and_findings(scan_id, db, current_user)

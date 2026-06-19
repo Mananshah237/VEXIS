@@ -1,4 +1,5 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -11,9 +12,14 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Import all models so Alembic can detect them
+# Use the runtime DATABASE_URL when present so migrations target the real DB.
+_db_url = os.environ.get("DATABASE_URL")
+if _db_url:
+    config.set_main_option("sqlalchemy.url", _db_url)
+
+# Import all models so Alembic can detect every table (scan, finding, user).
 from app.database import Base
-from app.models import scan, finding  # noqa: F401
+from app.models import scan, finding, user  # noqa: F401
 
 target_metadata = Base.metadata
 

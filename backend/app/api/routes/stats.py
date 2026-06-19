@@ -6,7 +6,7 @@ from app.database import get_db
 from app.models.scan import Scan
 from app.models.finding import Finding
 from app.models.schemas import ScanResponse
-from app.api.deps import get_current_user
+from app.api.deps import require_user
 
 router = APIRouter()
 
@@ -14,19 +14,13 @@ router = APIRouter()
 @router.get("/stats")
 async def get_stats(
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user),
+    current_user: dict = Depends(require_user),
 ) -> dict:
-    # Scope to the caller's scans (or anonymous-only scans if unauthenticated)
-    if current_user:
-        scan_filter = Scan.user_id == current_user["id"]
-        finding_filter = Finding.scan_id.in_(
-            select(Scan.id).where(Scan.user_id == current_user["id"])
-        )
-    else:
-        scan_filter = Scan.user_id.is_(None)
-        finding_filter = Finding.scan_id.in_(
-            select(Scan.id).where(Scan.user_id.is_(None))
-        )
+    # Scope strictly to the authenticated caller's scans.
+    scan_filter = Scan.user_id == current_user["id"]
+    finding_filter = Finding.scan_id.in_(
+        select(Scan.id).where(Scan.user_id == current_user["id"])
+    )
 
     total_scans = await db.scalar(select(func.count(Scan.id)).where(scan_filter))
     total_findings = await db.scalar(select(func.count(Finding.id)).where(finding_filter))
@@ -53,19 +47,12 @@ async def get_recent_scans(
     status: str | None = Query(None),
     min_severity: str | None = Query(None, description="Return only scans with at least one finding at this severity"),
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user),
+    current_user: dict = Depends(require_user),
 ) -> dict:
-    """Return paginated scan history scoped to the caller.
-
-    Authenticated users see only their own scans.
-    Unauthenticated users see only anonymous scans (user_id IS NULL).
-    """
+    """Return paginated scan history scoped to the authenticated caller."""
     _SEV_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
-    if current_user:
-        user_filter = Scan.user_id == current_user["id"]
-    else:
-        user_filter = Scan.user_id.is_(None)
+    user_filter = Scan.user_id == current_user["id"]
 
     q = select(Scan).where(user_filter)
     if status:

@@ -1,5 +1,19 @@
+import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
+
+# Secret values that must never be used outside an explicit dev environment.
+# If any of these appear in JWT_SECRET / MINIO_SECRET_KEY while VEXIS_ENV is not
+# "dev"/"test", the app refuses to boot (see Settings.validate_secrets()).
+_KNOWN_WEAK_SECRETS = {
+    "",
+    "vexis-dev-jwt-secret-change-in-prod",
+    "vexis-dev-secret-change-in-prod",
+    "vexis-local-dev-secret",
+    "vexis_dev_password",
+    "change_me_generate_with_secrets_token_hex_32",
+    "change_me_strong_random_password",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +57,10 @@ DEFAULT_MAX_FILE_BYTES: int = 200_000  # 200 KB
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Deployment environment. Set VEXIS_ENV=production (or anything other than
+    # dev/test/local) to enforce the secret-strength startup guard.
+    env: str = "dev"
 
     # Database
     database_url: str = "postgresql+asyncpg://vexis:vexis@localhost:5432/vexis"
@@ -92,5 +110,47 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24 * 7  # 7 days
 
+    # Application-layer encryption key for secrets at rest (GitHub OAuth tokens,
+    # API keys). 32-byte url-safe base64 Fernet key. REQUIRED in production.
+    # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    encryption_key: str = ""
+
+    @property
+    def is_dev(self) -> bool:
+        return self.env.lower() in {"dev", "test", "local", "development"}
+
+    def validate_secrets(self) -> None:
+        """Fail closed: refuse to boot with empty/weak secrets outside dev.
+
+        Called at application startup (and importable by tooling). Raises
+        RuntimeError listing every misconfigured secret so the process exits
+        rather than silently running with a forgeable JWT signing key.
+        """
+        if self.is_dev:
+            return
+        problems: List[str] = []
+        if self.jwt_secret.strip().lower() in _KNOWN_WEAK_SECRETS or len(self.jwt_secret) < 32:
+            problems.append(
+                "JWT_SECRET is empty, a known dev default, or shorter than 32 chars"
+            )
+        if self.minio_secret_key.strip().lower() in _KNOWN_WEAK_SECRETS:
+            problems.append("MINIO_SECRET_KEY is empty or a known dev default")
+        if not self.encryption_key.strip():
+            problems.append(
+                "ENCRYPTION_KEY is not set — secrets-at-rest (GitHub tokens/API keys) "
+                "cannot be encrypted. Generate one with cryptography.fernet.Fernet."
+            )
+        if problems:
+            raise RuntimeError(
+                "Refusing to start with insecure configuration (VEXIS_ENV="
+                f"{self.env!r}):\n  - " + "\n  - ".join(problems)
+                + "\nSet strong values via environment variables, or set VEXIS_ENV=dev "
+                "for local development only."
+            )
+
 
 settings = Settings()
+
+# Allow an explicit opt-in for the strict guard even in tooling contexts.
+if os.environ.get("VEXIS_VALIDATE_SECRETS_ON_IMPORT", "").lower() == "true":
+    settings.validate_secrets()

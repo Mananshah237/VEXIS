@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSession } from "next-auth/react";
 
 const PHASES = [
   { key: "parsing", label: "Parsing" },
@@ -36,10 +37,15 @@ export function ScanProgress({ scanId, initialStatus }: Props) {
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState("Connecting...");
   const [connected, setConnected] = useState(false);
+  const { data: session } = useSession();
+  const vexisToken = (session as { vexisToken?: string } | null)?.vexisToken;
 
   useEffect(() => {
+    if (!vexisToken) return; // progress WS now requires the owner's token
     const wsBase = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000";
-    const ws = new WebSocket(`${wsBase}/ws/scan/${scanId}`);
+    const ws = new WebSocket(
+      `${wsBase}/ws/scan/${scanId}?token=${encodeURIComponent(vexisToken)}`
+    );
 
     ws.onopen = () => {
       setConnected(true);
@@ -65,7 +71,7 @@ export function ScanProgress({ scanId, initialStatus }: Props) {
     ws.onclose = () => setConnected(false);
 
     return () => ws.close();
-  }, [scanId]);
+  }, [scanId, vexisToken]);
 
   const currentIdx = PHASE_ORDER[phase] ?? -1;
   const isFailed = phase === "failed";

@@ -132,6 +132,24 @@ def get_signed_url(bucket: str, object_name: str, expires_seconds: int = 3600) -
         return None
 
 
+def delete_prefix(bucket: str, prefix: str) -> int:
+    """Delete every object under a prefix. Returns the count removed (best-effort)."""
+    client = get_client()
+    if not client:
+        return 0
+    removed = 0
+    try:
+        for obj in client.list_objects(bucket, prefix=prefix, recursive=True):
+            try:
+                client.remove_object(bucket, obj.object_name)
+                removed += 1
+            except Exception as e:
+                log.warning("minio.remove_failed", bucket=bucket, object=obj.object_name, error=str(e))
+    except Exception as e:
+        log.warning("minio.delete_prefix_failed", bucket=bucket, prefix=prefix, error=str(e))
+    return removed
+
+
 def list_objects(bucket: str, prefix: str) -> list[str]:
     """List object names in a bucket with the given prefix."""
     client = get_client()

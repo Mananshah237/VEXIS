@@ -77,8 +77,40 @@ async def _redis_subscriber(scan_id: str, ws: WebSocket) -> None:
         log.debug("redis.subscriber_failed", scan_id=scan_id, error=str(e))
 
 
+async def _ws_authorize(scan_id: str, token: str | None) -> bool:
+    """Authorize a WebSocket subscriber against scan ownership.
+
+    The browser passes the VEXIS JWT as a `?token=` query param (WebSocket
+    clients cannot set Authorization headers). The channel only streams progress
+    phase/percent (not finding data), but we still scope it to the owner so
+    one user cannot watch another user's scan progress.
+    """
+    if not token:
+        return False
+    try:
+        import uuid as _uuid
+        from app.core.auth import decode_token
+        from app.database import AsyncSessionLocal
+        from app.models.scan import Scan
+        from sqlalchemy import select
+
+        payload = decode_token(token)
+        user_id = _uuid.UUID(payload["sub"])
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(select(Scan).where(Scan.id == _uuid.UUID(scan_id)))
+            scan = res.scalar_one_or_none()
+        if not scan:
+            return False
+        return scan.user_id is not None and str(scan.user_id) == str(user_id)
+    except Exception:
+        return False
+
+
 @router.websocket("/ws/scan/{scan_id}")
-async def scan_websocket(ws: WebSocket, scan_id: str) -> None:
+async def scan_websocket(ws: WebSocket, scan_id: str, token: str | None = None) -> None:
+    if not await _ws_authorize(scan_id, token):
+        await ws.close(code=4401)  # 4401: unauthorized (application close code)
+        return
     await manager.connect(scan_id, ws)
     redis_task = asyncio.create_task(_redis_subscriber(scan_id, ws))
     try:

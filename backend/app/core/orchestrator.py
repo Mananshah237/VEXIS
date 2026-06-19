@@ -108,7 +108,12 @@ async def _run_scan_impl(scan_id: str) -> None:
             await _update_status(db, scan, ScanStatus.PARSING, 0.05)
             await _broadcast(scan_id, "parsing", 0.1, "Fetching source code...")
 
-            source_path = await _fetch_source(scan)
+            github_token = None
+            if scan.source_type == "github_url" and scan.user_id is not None:
+                from app.models.user import User
+                _owner = (await db.execute(select(User).where(User.id == scan.user_id))).scalar_one_or_none()
+                github_token = _owner.github_token_plain if _owner else None
+            source_path = await _fetch_source(scan, github_token)
             if scan.source_type == "raw_code":
                 _temp_dir = source_path
 
@@ -122,7 +127,11 @@ async def _run_scan_impl(scan_id: str) -> None:
 
             _JS_EXTENSIONS = {"*.js", "*.jsx", "*.ts", "*.tsx"}
             all_py_files = sorted(
-                f for ext in ["*.py", "*.js", "*.jsx", "*.ts", "*.tsx"]
+                f for ext in [
+                    "*.py", "*.js", "*.jsx", "*.ts", "*.tsx", "*.java",
+                    "*.go", "*.rb", "*.c", "*.h", "*.cpp", "*.cc", "*.cxx",
+                    "*.hpp", "*.rs", "*.sh", "*.bash",
+                ]
                 for f in Path(source_path).rglob(ext)
             )
 
@@ -726,12 +735,12 @@ async def _update_status(db, scan: Scan, status: ScanStatus, progress: float | N
     await db.commit()
 
 
-async def _fetch_source(scan: Scan) -> str:
+async def _fetch_source(scan: Scan, github_token: str | None = None) -> str:
     """Returns path to directory containing source code on disk."""
     from app.core.git_ops import clone_repo
 
     if scan.source_type == "github_url":
-        return await clone_repo(scan.source_ref)
+        return await clone_repo(scan.source_ref, token=github_token)
 
     elif scan.source_type == "file_upload":
         return scan.source_ref

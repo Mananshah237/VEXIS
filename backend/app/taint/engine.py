@@ -23,6 +23,12 @@ from app.ingestion.pdg_builder import PDG, PDGNode, EdgeType, NodeType
 from app.ingestion.trust_boundaries import (
     TAINT_SOURCES, TAINT_SINKS, SANITIZERS,
     JS_TAINT_SOURCES, JS_TAINT_SINKS, JS_SANITIZERS,
+    JAVA_TAINT_SOURCES, JAVA_TAINT_SINKS, JAVA_SANITIZERS,
+    GO_TAINT_SOURCES, GO_TAINT_SINKS, GO_SANITIZERS,
+    RUBY_TAINT_SOURCES, RUBY_TAINT_SINKS, RUBY_SANITIZERS,
+    C_TAINT_SOURCES, C_TAINT_SINKS, C_SANITIZERS,
+    RUST_TAINT_SOURCES, RUST_TAINT_SINKS, RUST_SANITIZERS,
+    BASH_TAINT_SOURCES, BASH_TAINT_SINKS, BASH_SANITIZERS,
     EXTRA_SINKS, EXTRA_SANITIZERS,
     SourcePattern, SinkPattern, SanitizerPattern,
 )
@@ -82,20 +88,65 @@ class TaintEngine:
     MAX_ITERATIONS = 10000
 
     def __init__(self) -> None:
-        self._sources = TAINT_SOURCES + JS_TAINT_SOURCES
-        self._sinks = TAINT_SINKS + JS_TAINT_SINKS + EXTRA_SINKS
-        self._sanitizers = SANITIZERS + JS_SANITIZERS + EXTRA_SANITIZERS
+        # Patterns are scoped per language: matching every language's patterns
+        # against every file causes cross-language collisions (e.g. Python's
+        # FastAPI `Query(` source matching Go's `db.Query(` sink). Each node
+        # carries its language; _lists_for() returns only the relevant patterns.
+        self._groups: dict[str, tuple[list, list, list]] = {
+            "python": (TAINT_SOURCES, TAINT_SINKS + EXTRA_SINKS, SANITIZERS + EXTRA_SANITIZERS),
+            "javascript": (JS_TAINT_SOURCES, JS_TAINT_SINKS + EXTRA_SINKS, JS_SANITIZERS + EXTRA_SANITIZERS),
+            "java": (JAVA_TAINT_SOURCES, JAVA_TAINT_SINKS, JAVA_SANITIZERS),
+            "go": (GO_TAINT_SOURCES, GO_TAINT_SINKS, GO_SANITIZERS),
+            "ruby": (RUBY_TAINT_SOURCES, RUBY_TAINT_SINKS, RUBY_SANITIZERS),
+            "c": (C_TAINT_SOURCES, C_TAINT_SINKS, C_SANITIZERS),
+            "rust": (RUST_TAINT_SOURCES, RUST_TAINT_SINKS, RUST_SANITIZERS),
+            "bash": (BASH_TAINT_SOURCES, BASH_TAINT_SINKS, BASH_SANITIZERS),
+        }
+        # Aliases → group key
+        self._lang_alias = {
+            "typescript": "javascript", "tsx": "javascript", "jsx": "javascript",
+            "cpp": "c",
+        }
+        # Framework profiles (Flask/Django/Express…) apply on top of any language.
+        self._fw_sources: list = []
+        self._fw_sinks: list = []
+        self._fw_sanitizers: list = []
+
+        # Flat union — kept for backward-compat references and the fallback path.
+        self._sources = [p for s, _, _ in self._groups.values() for p in s]
+        self._sinks = [p for _, s, _ in self._groups.values() for p in s]
+        self._sanitizers = [p for _, _, s in self._groups.values() for p in s]
         # Early-termination threshold: paths with danger below this are not reported
         self._danger_threshold = float(os.environ.get("VEXIS_DANGER_THRESHOLD", "0.15"))
 
     def apply_framework_profile(self, profile: "FrameworkProfile") -> None:
-        """Merge framework-specific patterns into the running engine."""
+        """Merge framework-specific patterns into the running engine.
+
+        Framework patterns (Flask/Django/Express…) apply on top of whatever the
+        file's language patterns are, so they are kept in a separate set that
+        _lists_for() appends to every language.
+        """
+        self._fw_sources += profile.extra_sources
+        self._fw_sinks += profile.extra_sinks
+        self._fw_sanitizers += profile.extra_sanitizers
         self._sources = self._sources + profile.extra_sources
         self._sinks = self._sinks + profile.extra_sinks
         self._sanitizers = self._sanitizers + profile.extra_sanitizers
         log.debug("framework_profile.applied", framework=profile.name,
                   extra_sources=len(profile.extra_sources),
                   extra_sinks=len(profile.extra_sinks))
+
+    def _lists_for(self, language: str) -> tuple[list, list, list]:
+        """Return (sources, sinks, sanitizers) applicable to a node's language."""
+        key = self._lang_alias.get(language, language)
+        grp = self._groups.get(key)
+        if grp is None:
+            # Unknown language (e.g. raw snippet) — fall back to the full union.
+            return self._sources, self._sinks, self._sanitizers
+        src, sink, san = grp
+        if self._fw_sources or self._fw_sinks or self._fw_sanitizers:
+            return (src + self._fw_sources, sink + self._fw_sinks, san + self._fw_sanitizers)
+        return src, sink, san
 
     def analyze_project(
         self,
@@ -275,7 +326,8 @@ class TaintEngine:
         if node.node_type not in self._MATCHABLE_NODE_TYPES:
             return None
         code = node.code
-        for pattern in self._sources:
+        sources, _, _ = self._lists_for(node.language)
+        for pattern in sources:
             if self._pattern_matches(pattern.pattern, code):
                 return pattern
         return None
@@ -284,14 +336,16 @@ class TaintEngine:
         if node.node_type not in self._MATCHABLE_NODE_TYPES:
             return None
         code = node.code
-        for pattern in self._sinks:
+        _, sinks, _ = self._lists_for(node.language)
+        for pattern in sinks:
             if self._pattern_matches(pattern.pattern, code):
                 return pattern
         return None
 
     def _match_sanitizer(self, node: PDGNode) -> Optional[SanitizerPattern]:
         code = node.code
-        for pattern in self._sanitizers:
+        _, _, sanitizers = self._lists_for(node.language)
+        for pattern in sanitizers:
             if pattern.pattern and pattern.pattern in code:
                 return pattern
         return None

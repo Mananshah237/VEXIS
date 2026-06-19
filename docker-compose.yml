@@ -4,16 +4,21 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - VEXIS_ENV=${VEXIS_ENV:-dev}
       - DATABASE_URL=postgresql+asyncpg://vexis:vexis@postgres:5432/vexis
       - REDIS_URL=redis://redis:6379
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - VEXIS_LOG_LEVEL=INFO
+      # Secrets come from the environment (.env / secret manager). No weak
+      # defaults are baked in — set these before deploying outside dev.
+      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
       - MINIO_ENDPOINT=minio:9000
       - MINIO_PUBLIC_ENDPOINT=http://localhost:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-vexis}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-vexis-local-dev-secret}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY in .env}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -30,10 +35,16 @@ services:
   celery_worker:
     build: ./backend
     environment:
+      - VEXIS_ENV=${VEXIS_ENV:-dev}
       - DATABASE_URL=postgresql+asyncpg://vexis:vexis@postgres:5432/vexis
       - REDIS_URL=redis://redis:6379
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-vexis}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY in .env}
       - VEXIS_USE_CELERY=true
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -52,11 +63,14 @@ services:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
+      # Server-side (NextAuth callback) reaches the backend via the compose service name.
+      - BACKEND_INTERNAL_URL=http://api:8000
       - NEXT_PUBLIC_WS_URL=ws://localhost:8000
       - NEXTAUTH_URL=http://localhost:3000
-      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-vexis-dev-secret-change-in-prod}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET in .env}
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
+      - AUTH_ENFORCED=${AUTH_ENFORCED:-true}
     depends_on:
       - api
     volumes:
@@ -89,7 +103,7 @@ services:
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-vexis}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-vexis-local-dev-secret}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY in .env}
     ports:
       - "9000:9000"
       - "9001:9001"

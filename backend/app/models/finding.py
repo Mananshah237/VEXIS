@@ -37,6 +37,8 @@ class Finding(Base):
     remediation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     chain_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # set for vuln_class="chain"
     exploit_script: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Autofix: {"patched_code", "diff", "explanation", "summary"} + optional {"pr_url"}
+    autofix: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     triage_status: Mapped[str] = mapped_column(String(30), default="open")
     triage_notes: Mapped[str | None] = mapped_column(Text, nullable=True)

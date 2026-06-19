@@ -84,12 +84,30 @@ async def _run_git(*args: str) -> tuple[int, str, str]:
     return proc.returncode, stdout.decode(), stderr.decode()
 
 
-async def clone_repo(url: str) -> str:
+async def clone_repo(url: str, token: str | None = None) -> str:
     """
     Return path to a fresh temp directory containing the repo.
     Uses a local disk cache to avoid repeated full clones.
+
+    If `token` is given (private repo), clone fresh with an authenticated URL and
+    SKIP the shared cache — so the token never lands in a cache key/path and
+    private code isn't cached under a URL-only key.
     """
     _validate_repo_url(url)
+
+    if token and url.startswith("https://"):
+        auth_url = "https://x-access-token:" + token + "@" + url[len("https://"):]
+        tmp_dir = tempfile.mkdtemp(prefix="vexis_scan_")
+        rc, _, err = await asyncio.wait_for(
+            _run_git("clone", "--depth=1", "--single-branch", auth_url, tmp_dir),
+            timeout=120.0,
+        )
+        if rc != 0:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            safe_err = err.replace(token, "***") if token else err
+            raise RuntimeError(f"Authenticated git clone failed: {safe_err}")
+        log.info("git.clone.private_done", url=url)
+        return tmp_dir
 
     key = _cache_key(url)
     cache_dir = os.path.join(CLONE_CACHE_DIR, key)

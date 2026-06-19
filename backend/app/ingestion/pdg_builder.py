@@ -39,6 +39,7 @@ class PDGNode:
     line: int
     col: int
     code: str
+    language: str = ""
     ast_node: Any = field(repr=False, default=None)
     variables_defined: list[str] = field(default_factory=list)
     variables_used: list[str] = field(default_factory=list)
@@ -98,6 +99,7 @@ class PDGBuilder:
             line=node.start_point[0],
             col=node.start_point[1],
             code=code,
+            language=self._parsed.language,
             ast_node=node,
             variables_defined=self._extract_defined_vars(node),
             variables_used=self._extract_used_vars(node),
@@ -155,6 +157,31 @@ class PDGBuilder:
             "method_definition": NodeType.FUNCTION_DEF,
             "formal_parameters": NodeType.PARAMETER,
             "import_declaration": NodeType.IMPORT,
+            # Java
+            "local_variable_declaration": NodeType.ASSIGNMENT,
+            "method_invocation": NodeType.CALL,
+            "object_creation_expression": NodeType.CALL,
+            "method_declaration": NodeType.FUNCTION_DEF,
+            "constructor_declaration": NodeType.FUNCTION_DEF,
+            "enhanced_for_statement": NodeType.STATEMENT,
+            # Go
+            "short_var_declaration": NodeType.ASSIGNMENT,
+            "assignment_statement": NodeType.ASSIGNMENT,
+            "call_expression": NodeType.CALL,
+            "function_declaration": NodeType.FUNCTION_DEF,
+            # Ruby
+            "assignment": NodeType.ASSIGNMENT,
+            "method": NodeType.FUNCTION_DEF,
+            # C / C++
+            "declaration": NodeType.ASSIGNMENT,
+            "function_definition": NodeType.FUNCTION_DEF,
+            # Rust
+            "let_declaration": NodeType.ASSIGNMENT,
+            "macro_invocation": NodeType.CALL,
+            "function_item": NodeType.FUNCTION_DEF,
+            # Bash
+            "variable_assignment": NodeType.ASSIGNMENT,
+            "command": NodeType.CALL,
         }
         return type_map.get(node.type)
 
@@ -168,8 +195,8 @@ class PDGBuilder:
             left = node.child_by_field_name("left")
             if left and left.type == "identifier":
                 vars_.append(self._parsed.node_text(left))
-        elif node.type in ("variable_declaration", "lexical_declaration"):
-            # JS: const x = ..., let y = ...
+        elif node.type in ("variable_declaration", "lexical_declaration", "local_variable_declaration"):
+            # JS: const x = ..., let y = ...   Java: String x = ...
             for child in node.children:
                 if child.type == "variable_declarator":
                     name = child.child_by_field_name("name")
@@ -180,7 +207,43 @@ class PDGBuilder:
                         for sub in name.children:
                             if sub.type in ("shorthand_property_identifier_pattern", "identifier"):
                                 vars_.append(self._parsed.node_text(sub))
+        elif node.type in ("short_var_declaration", "assignment_statement"):
+            # Go: name := expr   /   name = expr
+            left = node.child_by_field_name("left")
+            if left:
+                for child in left.children if left.type == "expression_list" else [left]:
+                    if child.type == "identifier":
+                        vars_.append(self._parsed.node_text(child))
+        elif node.type == "declaration":
+            # C / C++: type declarator = value
+            for child in node.children:
+                if child.type == "init_declarator":
+                    name = self._c_declarator_name(child.child_by_field_name("declarator"))
+                    if name:
+                        vars_.append(name)
+        elif node.type == "let_declaration":
+            # Rust: let name = value
+            pat = node.child_by_field_name("pattern")
+            if pat and pat.type == "identifier":
+                vars_.append(self._parsed.node_text(pat))
+        elif node.type == "variable_assignment":
+            # Bash: name=value  (the LHS variable_name is a direct child)
+            for child in node.children:
+                if child.type == "variable_name":
+                    vars_.append(self._parsed.node_text(child))
+                    break
         return vars_
+
+    def _c_declarator_name(self, d: Any) -> Optional[str]:
+        """Descend a C/C++ declarator chain (pointer/array/function) to its identifier."""
+        while d is not None:
+            if d.type == "identifier":
+                return self._parsed.node_text(d)
+            nxt = d.child_by_field_name("declarator")
+            if nxt is None:
+                return None
+            d = nxt
+        return None
 
     def _extract_used_vars(self, node: Any) -> list[str]:
         vars_: list[str] = []
@@ -189,13 +252,43 @@ class PDGBuilder:
                 vars_.append(self._parsed.node_text(n))
             for child in n.children:
                 collect(child)
-        if node.type in ("call", "return_statement", "expression_statement"):
+        if node.type in (
+            "call", "return_statement", "expression_statement",
+            # Java
+            "method_invocation", "object_creation_expression", "local_variable_declaration",
+            # Go / Rust / C / C++
+            "call_expression", "macro_invocation",
+        ):
             collect(node)
-        elif node.type == "assignment":
+        elif node.type in ("assignment", "assignment_expression",
+                           "short_var_declaration", "assignment_statement"):
             right = node.child_by_field_name("right")
             if right:
                 collect(right)
+        elif node.type == "declaration":
+            # C / C++: collect from each declarator's value
+            for child in node.children:
+                if child.type == "init_declarator":
+                    val = child.child_by_field_name("value")
+                    if val:
+                        collect(val)
+        elif node.type == "let_declaration":
+            # Rust
+            val = node.child_by_field_name("value")
+            if val:
+                collect(val)
+        elif node.type in ("variable_assignment", "command"):
+            # Bash: a use is a $var expansion (not the assignment target)
+            self._collect_bash_uses(node, vars_)
         return list(set(vars_))
+
+    def _collect_bash_uses(self, node: Any, vars_: list[str]) -> None:
+        def walk(n: Any) -> None:
+            if n.type == "variable_name" and n.parent and n.parent.type in ("simple_expansion", "expansion"):
+                vars_.append(self._parsed.node_text(n))
+            for c in n.children:
+                walk(c)
+        walk(node)
 
     def _extract_calls(self, node: Any) -> list[str]:
         calls: list[str] = []
@@ -204,6 +297,21 @@ class PDGBuilder:
                 func = n.child_by_field_name("function")
                 if func:
                     calls.append(self._parsed.node_text(func))
+            elif n.type == "method_invocation":
+                # Java: object.name(args) — record the method name
+                name = n.child_by_field_name("name")
+                if name:
+                    calls.append(self._parsed.node_text(name))
+            elif n.type in ("call_expression", "macro_invocation"):
+                # Go / Rust / C / C++
+                func = n.child_by_field_name("function")
+                if func:
+                    calls.append(self._parsed.node_text(func))
+            elif n.type == "command":
+                # Bash
+                cn = n.child_by_field_name("name")
+                if cn:
+                    calls.append(self._parsed.node_text(cn))
             for child in n.children:
                 collect(child)
         collect(node)

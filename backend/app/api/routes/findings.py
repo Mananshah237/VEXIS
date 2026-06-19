@@ -7,7 +7,7 @@ from app.database import get_db
 from app.models.finding import Finding
 from app.models.scan import Scan
 from app.models.schemas import FindingSummaryResponse, FindingDetailResponse
-from app.api.deps import get_current_user
+from app.api.deps import require_user
 
 router = APIRouter()
 
@@ -20,16 +20,15 @@ async def list_findings(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user),
+    current_user: dict = Depends(require_user),
 ) -> dict:
-    # Verify the scan exists and the user has access to it
+    # Verify the scan exists and the user owns it
     scan_result = await db.execute(select(Scan).where(Scan.id == uuid.UUID(scan_id)))
     scan = scan_result.scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if scan.user_id is not None:
-        if not current_user or str(scan.user_id) != str(current_user["id"]):
-            raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.user_id is None or str(scan.user_id) != str(current_user["id"]):
+        raise HTTPException(status_code=404, detail="Scan not found")
 
     q = select(Finding).where(Finding.scan_id == uuid.UUID(scan_id))
     if severity:
@@ -51,7 +50,7 @@ async def list_findings(
 async def get_finding(
     finding_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user),
+    current_user: dict = Depends(require_user),
 ) -> FindingDetailResponse:
     result = await db.execute(select(Finding).where(Finding.id == uuid.UUID(finding_id)))
     finding = result.scalar_one_or_none()
@@ -60,7 +59,6 @@ async def get_finding(
     # Verify ownership through the parent scan
     scan_result = await db.execute(select(Scan).where(Scan.id == finding.scan_id))
     scan = scan_result.scalar_one_or_none()
-    if scan and scan.user_id is not None:
-        if not current_user or str(scan.user_id) != str(current_user["id"]):
-            raise HTTPException(status_code=404, detail="Finding not found")
+    if not scan or scan.user_id is None or str(scan.user_id) != str(current_user["id"]):
+        raise HTTPException(status_code=404, detail="Finding not found")
     return FindingDetailResponse.model_validate(finding)

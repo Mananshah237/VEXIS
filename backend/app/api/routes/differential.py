@@ -12,7 +12,7 @@ import uuid
 from app.database import get_db
 from app.models.scan import Scan
 from app.models.finding import Finding
-from app.api.deps import get_current_user
+from app.api.deps import require_user
 
 router = APIRouter()
 
@@ -21,15 +21,14 @@ router = APIRouter()
 async def get_differential(
     scan_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user),
+    current_user: dict = Depends(require_user),
 ) -> dict:
     scan_result = await db.execute(select(Scan).where(Scan.id == uuid.UUID(scan_id)))
     scan = scan_result.scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if scan.user_id is not None:
-        if not current_user or str(scan.user_id) != str(current_user["id"]):
-            raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.user_id is None or str(scan.user_id) != str(current_user["id"]):
+        raise HTTPException(status_code=404, detail="Scan not found")
 
     # Return cached differential if available
     cached = (scan.stats or {}).get("differential")

@@ -1,9 +1,26 @@
 "use client";
 
-import { useState, useRef, DragEvent, ChangeEvent } from "react";
+import { useState, useRef, useEffect, DragEvent, ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
+import { authHeaders } from "@/lib/api";
 
 type TabId = "paste" | "upload" | "github";
+
+type Repo = { full_name: string; html_url: string; private: boolean; updated_at: string };
+
+const LANGUAGES: { value: string; label: string }[] = [
+  { value: "python", label: "Python" },
+  { value: "javascript", label: "JavaScript" },
+  { value: "typescript", label: "TypeScript" },
+  { value: "java", label: "Java" },
+  { value: "go", label: "Go" },
+  { value: "ruby", label: "Ruby" },
+  { value: "c", label: "C" },
+  { value: "cpp", label: "C++" },
+  { value: "rust", label: "Rust" },
+  { value: "bash", label: "Bash" },
+];
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "paste", label: "Paste Code" },
@@ -24,7 +41,27 @@ export default function NewScanPage() {
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const { data: session } = useSession();
+  const [repos, setRepos] = useState<Repo[]>([]);
+  const [repoQuery, setRepoQuery] = useState("");
+  const [reposLoading, setReposLoading] = useState(false);
+  const [reposError, setReposError] = useState<string | null>(null);
+
   const apiBase = process.env.NEXT_PUBLIC_API_URL;
+
+  useEffect(() => {
+    if (tab !== "github" || !session || repos.length > 0 || reposLoading) return;
+    setReposLoading(true);
+    setReposError(null);
+    fetch("/api/github/repos")
+      .then(async (r) => {
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: Repo[]) => setRepos(data))
+      .catch((e) => setReposError(e.message ?? "Could not load repositories"))
+      .finally(() => setReposLoading(false));
+  }, [tab, session, repos.length, reposLoading]);
 
   function handleFileDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
@@ -65,7 +102,7 @@ export default function NewScanPage() {
     try {
       const resp = await fetch(`${apiBase}/api/v1/scan`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(await authHeaders()) },
         body: JSON.stringify(body),
       });
       if (!resp.ok) {
@@ -87,7 +124,8 @@ export default function NewScanPage() {
         <div className="mb-6">
           <h1 className="text-2xl font-display font-bold">New Scan</h1>
           <p className="text-text-muted text-sm mt-1">
-            Scan Python source code for vulnerabilities using taint analysis + AI reasoning.
+            Scan source code (Python, JS/TS, Java, Go, Ruby, C/C++, Rust, Bash) for
+            vulnerabilities using taint analysis + AI reasoning.
           </p>
         </div>
 
@@ -119,9 +157,9 @@ export default function NewScanPage() {
                   onChange={(e) => setLanguage(e.target.value)}
                   className="bg-bg-elevated border border-border rounded px-3 py-1 text-sm text-text-primary"
                 >
-                  <option value="python">Python</option>
-                  <option value="javascript" disabled>JavaScript (Phase 2)</option>
-                  <option value="go" disabled>Go (Phase 2)</option>
+                  {LANGUAGES.map((l) => (
+                    <option key={l.value} value={l.value}>{l.label}</option>
+                  ))}
                 </select>
               </div>
               <textarea
@@ -175,6 +213,53 @@ export default function NewScanPage() {
           {/* GitHub URL tab */}
           {tab === "github" && (
             <>
+              {/* Repo picker — shown when signed in with GitHub */}
+              {session ? (
+                <div>
+                  <label className="block text-sm text-text-secondary mb-2">Your repositories</label>
+                  {reposLoading && <p className="text-text-muted text-sm">Loading your repositories…</p>}
+                  {reposError && (
+                    <p className="text-severity-critical text-sm mb-2">{reposError}</p>
+                  )}
+                  {!reposLoading && !reposError && (
+                    <>
+                      <input
+                        type="text"
+                        value={repoQuery}
+                        onChange={(e) => setRepoQuery(e.target.value)}
+                        placeholder="Filter repositories…"
+                        className="w-full bg-bg-elevated border border-border rounded-lg px-4 py-2 mb-2 text-text-primary text-sm placeholder-text-muted focus:outline-none focus:border-accent-primary"
+                      />
+                      <div className="max-h-60 overflow-auto border border-border rounded-lg divide-y divide-border">
+                        {repos
+                          .filter((r) => r.full_name.toLowerCase().includes(repoQuery.toLowerCase()))
+                          .slice(0, 100)
+                          .map((r) => (
+                            <button
+                              type="button"
+                              key={r.full_name}
+                              onClick={() => setGithubUrl(r.html_url)}
+                              className={`w-full text-left px-3 py-2 text-sm hover:bg-bg-elevated transition-colors ${
+                                githubUrl === r.html_url ? "bg-accent-primary/10 text-accent-primary" : "text-text-secondary"
+                              }`}
+                            >
+                              {r.full_name}{" "}
+                              {r.private && <span className="text-text-muted text-xs">(private)</span>}
+                            </button>
+                          ))}
+                        {repos.length === 0 && (
+                          <p className="px-3 py-2 text-text-muted text-sm">No repositories found.</p>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <p className="text-text-muted text-xs">
+                  Sign in with GitHub to pick from your repositories, or paste any public repo URL below.
+                </p>
+              )}
+
               <div>
                 <label className="block text-sm text-text-secondary mb-2">Repository URL</label>
                 <input
@@ -186,7 +271,7 @@ export default function NewScanPage() {
                 />
               </div>
               <p className="text-text-muted text-xs">
-                VEXIS will clone the repository and scan all Python files. Large repos may take up to 5 minutes.
+                VEXIS clones the repository and scans all supported source files. Large repos may take up to 5 minutes.
               </p>
             </>
           )}

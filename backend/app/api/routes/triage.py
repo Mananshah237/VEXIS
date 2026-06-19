@@ -7,7 +7,7 @@ from app.database import get_db
 from app.models.finding import Finding
 from app.models.scan import Scan
 from app.models.schemas import TriageRequest
-from app.api.deps import get_current_user
+from app.api.deps import require_user
 
 router = APIRouter()
 
@@ -17,7 +17,7 @@ async def triage_finding(
     finding_id: str,
     body: TriageRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user),
+    current_user: dict = Depends(require_user),
 ) -> dict:
     result = await db.execute(select(Finding).where(Finding.id == uuid.UUID(finding_id)))
     finding = result.scalar_one_or_none()
@@ -27,9 +27,8 @@ async def triage_finding(
     # Verify caller owns the scan this finding belongs to
     scan_result = await db.execute(select(Scan).where(Scan.id == finding.scan_id))
     scan = scan_result.scalar_one_or_none()
-    if scan and scan.user_id is not None:
-        if not current_user or str(scan.user_id) != str(current_user["id"]):
-            raise HTTPException(status_code=404, detail="Finding not found")
+    if not scan or scan.user_id is None or str(scan.user_id) != str(current_user["id"]):
+        raise HTTPException(status_code=404, detail="Finding not found")
 
     finding.triage_status = body.status
     finding.triage_notes = body.notes

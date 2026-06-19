@@ -11,10 +11,11 @@ from tree_sitter import Language, Parser, Node
 
 PY_LANGUAGE = Language(tspython.language())
 
-# Lazy-load JS/TS grammars to avoid import errors if not installed
+# Lazy-load JS/TS/Java grammars to avoid import errors if not installed
 _JS_LANGUAGE: Language | None = None
 _TS_LANGUAGE: Language | None = None
 _TSX_LANGUAGE: Language | None = None
+_JAVA_LANGUAGE: Language | None = None
 
 
 def _get_js_language() -> Language:
@@ -41,13 +42,75 @@ def _get_tsx_language() -> Language:
     return _TSX_LANGUAGE
 
 
-# Map file extension → (language_name, language_getter)
+def _get_java_language() -> Language:
+    global _JAVA_LANGUAGE
+    if _JAVA_LANGUAGE is None:
+        import tree_sitter_java as tsjava
+        _JAVA_LANGUAGE = Language(tsjava.language())
+    return _JAVA_LANGUAGE
+
+
+# Additional grammars, each lazily loaded so a missing binding only disables
+# that one language instead of breaking import.
+_LAZY_LANGS: dict[str, Language] = {}
+
+
+def _lazy(name: str, importer) -> Language:
+    if name not in _LAZY_LANGS:
+        _LAZY_LANGS[name] = Language(importer())
+    return _LAZY_LANGS[name]
+
+
+def _get_go_language() -> Language:
+    import tree_sitter_go as ts
+    return _lazy("go", ts.language)
+
+
+def _get_ruby_language() -> Language:
+    import tree_sitter_ruby as ts
+    return _lazy("ruby", ts.language)
+
+
+def _get_c_language() -> Language:
+    import tree_sitter_c as ts
+    return _lazy("c", ts.language)
+
+
+def _get_cpp_language() -> Language:
+    import tree_sitter_cpp as ts
+    return _lazy("cpp", ts.language)
+
+
+def _get_rust_language() -> Language:
+    import tree_sitter_rust as ts
+    return _lazy("rust", ts.language)
+
+
+def _get_bash_language() -> Language:
+    import tree_sitter_bash as ts
+    return _lazy("bash", ts.language)
+
+
+# Map file extension → (language_name, language_getter). Single source of truth
+# for which extensions VEXIS can parse.
 _EXT_MAP: dict[str, tuple[str, Any]] = {
     ".py": ("python", lambda: PY_LANGUAGE),
     ".js": ("javascript", _get_js_language),
     ".jsx": ("javascript", _get_js_language),
     ".ts": ("typescript", _get_ts_language),
     ".tsx": ("typescript", _get_tsx_language),
+    ".java": ("java", _get_java_language),
+    ".go": ("go", _get_go_language),
+    ".rb": ("ruby", _get_ruby_language),
+    ".c": ("c", _get_c_language),
+    ".h": ("c", _get_c_language),
+    ".cpp": ("cpp", _get_cpp_language),
+    ".cc": ("cpp", _get_cpp_language),
+    ".cxx": ("cpp", _get_cpp_language),
+    ".hpp": ("cpp", _get_cpp_language),
+    ".rs": ("rust", _get_rust_language),
+    ".sh": ("bash", _get_bash_language),
+    ".bash": ("bash", _get_bash_language),
 }
 
 
@@ -91,6 +154,20 @@ class CodeParser:
                 self._parsers[language] = Parser(_get_ts_language())
             elif language == "tsx":
                 self._parsers[language] = Parser(_get_tsx_language())
+            elif language == "java":
+                self._parsers[language] = Parser(_get_java_language())
+            elif language == "go":
+                self._parsers[language] = Parser(_get_go_language())
+            elif language == "ruby":
+                self._parsers[language] = Parser(_get_ruby_language())
+            elif language == "c":
+                self._parsers[language] = Parser(_get_c_language())
+            elif language == "cpp":
+                self._parsers[language] = Parser(_get_cpp_language())
+            elif language == "rust":
+                self._parsers[language] = Parser(_get_rust_language())
+            elif language == "bash":
+                self._parsers[language] = Parser(_get_bash_language())
             else:
                 self._parsers[language] = Parser(PY_LANGUAGE)
         return self._parsers[language]

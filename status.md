@@ -1,6 +1,154 @@
 # VEXIS — Project Status
 
-Last updated: 2026-03-29 (Sprint 10)
+Last updated: 2026-06-18
+
+---
+
+## 2026-06-18 — Security hardening pass
+
+Worked through `SECURITY_AUDIT.md`. Done:
+
+- **Auth is now mandatory:** `deps.py` no longer downgrades invalid/missing
+  credentials to an anonymous user (bad token → 401); the Next.js auth middleware
+  matcher (`frontend/src/middleware.ts`) is re-enabled to protect app routes.
+- **Anon data exposure / IDOR closed:** scans require auth to create and every
+  read/list/download is owner-scoped — previously `user_id NULL` scans were
+  world-readable.
+- **JWT secret:** required from env with a startup guard (no empty/default boot).
+  Weak dev secrets pulled out of `.env`/`docker-compose.yml`.
+- **Secrets at rest:** GitHub OAuth token + provider API keys are now encrypted in
+  the `users` table (`app/core/crypto.py`, Fernet via `VEXIS_ENCRYPTION_KEY`).
+- **Rate limiting** now covers the anonymous path and fails closed.
+- **Migrations/DR:** added the initial Alembic migration
+  (`alembic/versions/0001_initial_schema`); GDPR erasure via `DELETE /auth/me`
+  (cascades findings → scans → user + MinIO objects).
+- **Tests + CI:** taint/sample + API tests — **33 passing**; CI runs the fuller
+  suite + SCA. `docs/DISASTER_RECOVERY.md` and `docs/DATA_RETENTION.md` added.
+
+**Rotate:** the live Gemini key that was in `.env` (git-ignored, not in history) —
+rotate it in the provider console. Set a fresh `JWT_SECRET` + `VEXIS_ENCRYPTION_KEY`.
+
+---
+
+## 2026-06-16 — Full-stack auth exchange (frontend ↔ backend) + autofix UI
+
+The frontend (NextAuth) and backend (own JWT) auth systems didn't talk: API calls
+were anonymous and the GitHub token never reached the backend. Now coherent end to end:
+
+- **Backend `/auth/token`** accepts the NextAuth GitHub access token (not just an
+  OAuth `code`), upserts the user, **stores the GitHub token** on the user, returns
+  a VEXIS JWT.
+- **`get_current_user`** (deps) now loads the user and surfaces `github_token`.
+- **NextAuth `jwt` callback** exchanges the GitHub token → VEXIS JWT and puts it in
+  the session (`vexisToken`); server-side fetch uses `BACKEND_INTERNAL_URL`
+  (added to docker-compose as `http://api:8000`) so it works inside Docker.
+- **`api.ts`** sends `Authorization: Bearer <vexisToken>` on every call (+ new
+  `generateAutofix` / `openPullRequest` helpers); scan creation + finding page are
+  now authenticated, so **scans are owned** and ownership checks work.
+- **Private-repo clone**: `clone_repo(url, token)` does a fresh authenticated clone
+  (bypassing the shared cache so the token never lands in a cache key/log);
+  orchestrator passes the scan owner's stored token.
+- **PR endpoint** uses the stored token automatically (token no longer required in
+  the request body).
+- **Finding page**: added the **Suggested Fix** panel — Generate Fix → colored diff +
+  explanation → Open Pull Request → View PR link.
+- **Schema**: `findings.autofix` and `users.github_token` added to the startup
+  auto-migration list (`_SCHEMA_MIGRATIONS`), so existing DBs get them on boot.
+
+Not verifiable here: frontend not typechecked/built (node_modules absent) and the
+PR/private-clone flow needs a live GitHub token + repo to confirm end to end.
+
+---
+
+## 2026-06-16 — Autofix + PR generation, and GitHub sign-in / repo picker fixes
+
+### Autofix + PR generation (new)
+- `app/exploit/autofix_generator.py` — LLM produces a remediated version of the
+  vulnerable code + a unified diff + explanation (mirrors the exploit-script
+  generator; per-vuln-class fallback hints when no LLM).
+- `app/exploit/pr_generator.py` — GitHub REST API: fetch file → create branch →
+  commit the fix → open a PR (needs the user's token with `repo` scope).
+- `app/api/routes/autofix.py` (registered in `main.py`):
+  - `POST /api/v1/finding/{id}/autofix/generate` — generate + store the fix.
+  - `GET  /api/v1/finding/{id}/autofix` — return it.
+  - `POST /api/v1/finding/{id}/pr` — open a fix PR (fixes the whole file, opens PR).
+- `Finding.autofix` JSON column added (patched_code/diff/explanation/summary[/pr_url]).
+  NOTE: dev uses create_all(); existing DBs need an Alembic migration for this column.
+
+### GitHub sign-in / repo selection fixes
+- `frontend/src/lib/auth.ts` — GitHub provider now requests scopes
+  `read:user user:email repo` (was none → token couldn't list repos or open PRs).
+  Existing users must re-authorize to pick up the new scope.
+- `frontend/src/app/api/github/repos/route.ts` — new server route listing the
+  user's repos with their session token (token stays server-side).
+- `frontend/src/app/scan/new/page.tsx` — added a searchable **repo picker** in the
+  GitHub tab (when signed in); enabled all 10 languages in the dropdown (was
+  Python only, JS/Go marked "Phase 2 disabled"); updated copy.
+
+Pending/untested against live GitHub: the PR flow needs a real token + repo to
+verify end-to-end; repo-relative path derivation from `sink_file` is best-effort
+(strips clone prefix up to the repo name).
+
+---
+
+## 2026-06-16 — Full language set (Go, Ruby, C/C++, Rust, Bash) + language-scoped matching
+
+Added five more languages on top of Java, so VEXIS now analyzes:
+**Python, JS/TS, Java, Go, Ruby, C, C++, Rust, Bash.**
+
+- Grammars registered in `parser.py` (`.go .rb .c .h .cpp .cc .cxx .hpp .rs .sh .bash`);
+  deps added to `pyproject.toml`; extensions added to `orchestrator.py` scan discovery.
+- `pdg_builder.py` teaches each language's AST node types + variable def/use/call
+  extraction (Go short_var_declaration, C declarator chains, Rust let_declaration,
+  Bash variable_assignment/$-expansions, Ruby assignment/call, etc.).
+- `trust_boundaries.py` adds `<LANG>_TAINT_SOURCES/SINKS/SANITIZERS` per language,
+  incl. a new **buffer_overflow** vuln class for C/C++ (strcpy/strcat/sprintf/gets).
+
+### Important fix — language-scoped pattern matching
+Matching every language's patterns against every file caused cross-language
+collisions (Python's FastAPI `Query(` source matched Go's `db.Query(` sink → false
+positive). Fixed properly:
+- `PDGNode` now carries `language`; the cross-file linker preserves it.
+- `TaintEngine` matches only the node's language patterns (+ framework extras),
+  via `_lists_for()` / `_groups`.
+- `graph_folder` pattern set now includes all languages so sanitizer nodes in any
+  language are treated as anchors (not folded away).
+
+Tests: new `tests/test_polyglot_samples.py` (14 tests across Go/Ruby/C/Rust/Bash)
++ `tests/test_java_samples.py` (8) + existing engine/sample tests = **32 passed**.
+
+Remaining from the original wishlist: HTML & Markdown don't fit a taint/data-flow
+model (no sources→sinks) — they'd need a separate pattern-scanner engine; COBOL
+needs a maintained tree-sitter grammar + a test corpus. Both deferred deliberately.
+
+---
+
+## 2026-06-15 — Java language support added
+
+VEXIS now analyzes **Java** in addition to Python and JS/TS (first new language
+of the multi-language expansion).
+
+Wired in five places (see `app/ingestion/languages/java.py` for the full recipe):
+- `parser.py` — tree-sitter-java grammar registered (`.java` extension).
+- `pdg_builder.py` — Java AST node types added to the classifier and to
+  variable def/use/call extraction (`local_variable_declaration`,
+  `method_invocation`, `method_declaration`, etc.).
+- `trust_boundaries.py` — `JAVA_TAINT_SOURCES / JAVA_TAINT_SINKS / JAVA_SANITIZERS`
+  (Servlet + Spring sources; JDBC/Runtime/File/response/SSRF/deser sinks;
+  PreparedStatement, numeric casts, FilenameUtils, HTML encoders as CCSM sanitizers).
+- `taint/engine.py` — Java lists concatenated into the engine.
+- `core/orchestrator.py` + `pyproject.toml` — `.java` added to scan discovery and
+  `tree-sitter-java` to dependencies.
+
+Tests: new `tests/test_java_samples.py` — **8 Java tests** (SQLi, command
+injection, path traversal, reflected XSS — vulnerable detected + safe cleared).
+Full analysis suite (Java + existing): **19 passed**. Corpus under
+`tests/vulnerable_samples/{sqli,cmdi,path_traversal,xss}/*.java`.
+
+Next languages (mechanical, follow java.py recipe): Go, Ruby, C/C++, Rust.
+Deferred cleanup: move each language's (grammar, node-map, patterns) behind a
+`LanguageProfile` registry; consolidate the two extension maps
+(`parser._EXT_MAP` and `core/language_detect.py`).
 
 ---
 

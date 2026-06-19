@@ -129,6 +129,7 @@ class CrossFileLinker:
                     line=old.line,
                     col=old.col,
                     code=old.code,
+                    language=old.language,
                     ast_node=old.ast_node,
                     variables_defined=list(old.variables_defined),
                     variables_used=list(old.variables_used),

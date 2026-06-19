@@ -5,14 +5,20 @@ import { useState } from "react";
 import useSWR, { mutate as globalMutate } from "swr";
 import Link from "next/link";
 import { AttackFlowGraph } from "@/components/AttackFlowGraph";
+import { api, authHeaders } from "@/lib/api";
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json());
+const fetcher = async (url: string) =>
+  fetch(url, { headers: await authHeaders() }).then((r) => r.json());
 
 export default function FindingDetailPage() {
   const { id, fid } = useParams<{ id: string; fid: string }>();
   const apiBase = process.env.NEXT_PUBLIC_API_URL;
   const [generatingExploit, setGeneratingExploit] = useState(false);
   const [exploitCopied, setExploitCopied] = useState(false);
+  const [generatingFix, setGeneratingFix] = useState(false);
+  const [openingPR, setOpeningPR] = useState(false);
+  const [prUrl, setPrUrl] = useState<string | null>(null);
+  const [fixError, setFixError] = useState<string | null>(null);
 
   const { data: finding, mutate: mutateFinding } = useSWR(
     `${apiBase}/api/v1/finding/${fid}`,
@@ -28,12 +34,42 @@ export default function FindingDetailPage() {
   const handleGenerateExploit = async () => {
     setGeneratingExploit(true);
     try {
-      await fetch(`${apiBase}/api/v1/finding/${fid}/exploit/generate`, { method: "POST" });
+      await fetch(`${apiBase}/api/v1/finding/${fid}/exploit/generate`, {
+        method: "POST",
+        headers: await authHeaders(),
+      });
       await mutateFinding();
     } catch {
       // ignore
     } finally {
       setGeneratingExploit(false);
+    }
+  };
+
+  const handleGenerateFix = async () => {
+    setGeneratingFix(true);
+    setFixError(null);
+    try {
+      await api.generateAutofix(fid);
+      await mutateFinding();
+    } catch (e: any) {
+      setFixError(e.message ?? "Failed to generate fix");
+    } finally {
+      setGeneratingFix(false);
+    }
+  };
+
+  const handleOpenPR = async () => {
+    setOpeningPR(true);
+    setFixError(null);
+    try {
+      const res = await api.openPullRequest(fid);
+      setPrUrl(res.pr_url);
+      await mutateFinding();
+    } catch (e: any) {
+      setFixError(e.message ?? "Failed to open PR");
+    } finally {
+      setOpeningPR(false);
     }
   };
 
@@ -270,6 +306,83 @@ export default function FindingDetailPage() {
             ) : (
               <p className="text-text-muted text-sm">
                 No exploit script generated yet. Click &quot;Generate Exploit Script&quot; to create a runnable PoC.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Autofix + PR */}
+        {finding.vuln_class !== "chain" && finding.taint_path?.type !== "business_logic_discovery" && (
+          <div className="bg-bg-secondary border border-severity-safe/30 rounded-lg p-6">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <h2 className="font-display font-semibold">Suggested Fix</h2>
+                <span className="text-xs text-severity-safe bg-severity-safe/10 px-2 py-0.5 rounded font-semibold">
+                  AI autofix
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {!finding.autofix && (
+                  <button
+                    onClick={handleGenerateFix}
+                    disabled={generatingFix}
+                    className="text-xs px-3 py-1.5 border border-accent-primary/50 rounded-lg text-accent-primary hover:bg-accent-primary/10 transition-colors disabled:opacity-50"
+                  >
+                    {generatingFix ? "Generating..." : "Generate Fix"}
+                  </button>
+                )}
+                {finding.autofix && (finding.autofix.pr_url || prUrl) ? (
+                  <a
+                    href={finding.autofix.pr_url || prUrl || "#"}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs px-3 py-1.5 border border-severity-safe/50 rounded-lg text-severity-safe hover:bg-severity-safe/10 transition-colors"
+                  >
+                    View PR ↗
+                  </a>
+                ) : finding.autofix ? (
+                  <button
+                    onClick={handleOpenPR}
+                    disabled={openingPR}
+                    className="text-xs px-3 py-1.5 border border-severity-safe/50 rounded-lg text-severity-safe hover:bg-severity-safe/10 transition-colors disabled:opacity-50"
+                  >
+                    {openingPR ? "Opening PR..." : "Open Pull Request"}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
+            {fixError && (
+              <div className="bg-severity-critical/10 border border-severity-critical/30 rounded-lg px-3 py-2 text-severity-critical text-xs mb-3">
+                {fixError}
+              </div>
+            )}
+
+            {finding.autofix ? (
+              <div className="space-y-3">
+                <p className="text-text-secondary text-sm">{finding.autofix.explanation}</p>
+                {finding.autofix.diff && (
+                  <pre className="text-xs bg-bg-elevated p-4 rounded-lg overflow-x-auto font-code leading-relaxed max-h-96 overflow-y-auto">
+                    {finding.autofix.diff.split("\n").map((line: string, i: number) => (
+                      <div
+                        key={i}
+                        className={
+                          line.startsWith("+") && !line.startsWith("+++")
+                            ? "text-severity-safe"
+                            : line.startsWith("-") && !line.startsWith("---")
+                            ? "text-severity-critical"
+                            : "text-text-muted"
+                        }
+                      >
+                        {line}
+                      </div>
+                    ))}
+                  </pre>
+                )}
+              </div>
+            ) : (
+              <p className="text-text-muted text-sm">
+                No fix generated yet. Click &quot;Generate Fix&quot; to get an AI-suggested patch, then open it as a pull request.
               </p>
             )}
           </div>

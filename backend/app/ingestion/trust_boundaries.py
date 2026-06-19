@@ -336,6 +336,259 @@ JS_SANITIZERS: list[SanitizerPattern] = [
 ]
 
 
+# ─── Java ───────────────────────────────────────────────────────────────────
+
+JAVA_TAINT_SOURCES: list[SourcePattern] = [
+    # Servlet / JSP
+    SourcePattern("request.getParameter(", source_type="http_param", description="Servlet request param"),
+    SourcePattern("request.getParameterValues(", source_type="http_param", description="Servlet multi-value param"),
+    SourcePattern("getParameter(", source_type="http_param", description="Servlet param (any handle)"),
+    SourcePattern("request.getHeader(", source_type="http_header", description="Servlet header"),
+    SourcePattern("request.getQueryString(", source_type="http_param", description="Servlet query string"),
+    SourcePattern("request.getCookies(", source_type="http_cookie", description="Servlet cookies"),
+    SourcePattern("getInputStream(", source_type="http_body", description="Servlet request body"),
+    # Spring MVC binding annotations
+    SourcePattern("@RequestParam", source_type="http_param", description="Spring request param"),
+    SourcePattern("@PathVariable", source_type="http_param", description="Spring path variable"),
+    SourcePattern("@RequestBody", source_type="http_body", description="Spring request body"),
+    SourcePattern("@RequestHeader", source_type="http_header", description="Spring header"),
+    # Process / env
+    SourcePattern("System.getenv(", source_type="env_var", description="Environment variable"),
+]
+
+JAVA_TAINT_SINKS: list[SinkPattern] = [
+    # SQL Injection
+    SinkPattern("executeQuery(", vuln_class="sqli", severity="critical", description="JDBC Statement.executeQuery"),
+    SinkPattern("executeUpdate(", vuln_class="sqli", severity="critical", description="JDBC Statement.executeUpdate"),
+    SinkPattern("executeLargeUpdate(", vuln_class="sqli", severity="critical"),
+    SinkPattern("createQuery(", vuln_class="sqli", severity="high", description="JPA/Hibernate HQL injection"),
+    SinkPattern("createNativeQuery(", vuln_class="sqli", severity="high"),
+    # Command Injection
+    SinkPattern(".exec(", vuln_class="cmdi", severity="critical", description="Runtime.exec"),
+    SinkPattern("getRuntime().exec(", vuln_class="cmdi", severity="critical"),
+    SinkPattern("ProcessBuilder(", vuln_class="cmdi", severity="critical", description="ProcessBuilder command"),
+    # Path Traversal
+    SinkPattern("new File(", vuln_class="path_traversal", severity="high", description="File construction with user input"),
+    SinkPattern("new FileInputStream(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("new FileReader(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("new FileOutputStream(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("Files.readAllBytes(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("Files.newInputStream(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("Files.lines(", vuln_class="path_traversal", severity="high"),
+    # Cross-Site Scripting (reflected, servlet response)
+    SinkPattern("getWriter().print", vuln_class="xss", severity="high", description="Servlet response writer"),
+    SinkPattern("getWriter().write", vuln_class="xss", severity="high"),
+    # SSRF
+    SinkPattern(".openConnection(", vuln_class="ssrf", severity="high", description="URL.openConnection with user URL"),
+    SinkPattern(".openStream(", vuln_class="ssrf", severity="high"),
+    # Insecure Deserialization
+    SinkPattern("readObject(", vuln_class="deserialization", severity="critical", description="Java native deserialization"),
+    SinkPattern("new ObjectInputStream(", vuln_class="deserialization", severity="high"),
+]
+
+JAVA_SANITIZERS: list[SanitizerPattern] = [
+    # Numeric casts — output is non-injectable, effective for all injection classes
+    SanitizerPattern("Integer.parseInt(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     constraint_power=0.95,
+                     effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     description="Integer parse — numeric output cannot be injected"),
+    SanitizerPattern("Long.parseLong(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     constraint_power=0.95,
+                     effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     description="Long parse — numeric output"),
+    SanitizerPattern("Double.parseDouble(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     constraint_power=0.95,
+                     effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     description="Double parse — numeric output"),
+    # SQLi — parameterized queries
+    SanitizerPattern("prepareStatement(", clears_for=["sqli"], constraint_power=0.90,
+                     effective_for=["sqli"], description="JDBC PreparedStatement (parameterized)"),
+    SanitizerPattern("setString(", clears_for=["sqli"], constraint_power=0.85,
+                     effective_for=["sqli"], description="PreparedStatement parameter binding"),
+    # Path traversal
+    SanitizerPattern("FilenameUtils.getName(", clears_for=["path_traversal"], constraint_power=0.90,
+                     effective_for=["path_traversal"],
+                     description="Apache Commons FilenameUtils.getName — strips directory components"),
+    SanitizerPattern(".getCanonicalPath(", clears_for=[], constraint_power=0.55,
+                     effective_for=["path_traversal"],
+                     description="Canonical path — partial, needs a prefix check"),
+    SanitizerPattern(".normalize(", clears_for=[], constraint_power=0.45,
+                     effective_for=["path_traversal"],
+                     description="Path normalize — partial, needs a prefix check"),
+    # XSS
+    SanitizerPattern("encodeForHTML(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"], description="OWASP ESAPI HTML encoder"),
+    SanitizerPattern("StringEscapeUtils.escapeHtml", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"], description="Apache Commons HTML escaping"),
+    SanitizerPattern("HtmlUtils.htmlEscape(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"], description="Spring HtmlUtils escaping"),
+]
+
+
+# ─── Go ───────────────────────────────────────────────────────────────────
+
+GO_TAINT_SOURCES: list[SourcePattern] = [
+    SourcePattern("FormValue(", source_type="http_param", description="net/http FormValue"),
+    SourcePattern(".Query().Get(", source_type="http_param", description="URL query param"),
+    SourcePattern("Header.Get(", source_type="http_header", description="HTTP header"),
+    SourcePattern("mux.Vars(", source_type="http_param", description="gorilla/mux path vars"),
+    SourcePattern("c.Query(", source_type="http_param", description="Gin query param"),
+    SourcePattern("c.Param(", source_type="http_param", description="Gin path param"),
+    SourcePattern("c.PostForm(", source_type="http_param", description="Gin form value"),
+    SourcePattern("os.Getenv(", source_type="env_var", description="Environment variable"),
+]
+GO_TAINT_SINKS: list[SinkPattern] = [
+    SinkPattern("db.Query(", vuln_class="sqli", severity="critical", description="database/sql Query"),
+    SinkPattern("db.Exec(", vuln_class="sqli", severity="critical"),
+    SinkPattern(".QueryRow(", vuln_class="sqli", severity="high"),
+    SinkPattern("exec.Command(", vuln_class="cmdi", severity="critical", description="os/exec Command"),
+    SinkPattern("os.Open(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("os.ReadFile(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("ioutil.ReadFile(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("http.Get(", vuln_class="ssrf", severity="high"),
+    SinkPattern("http.NewRequest(", vuln_class="ssrf", severity="high"),
+]
+GO_SANITIZERS: list[SanitizerPattern] = [
+    SanitizerPattern("strconv.Atoi(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     constraint_power=0.95,
+                     effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     description="Atoi — numeric output"),
+    SanitizerPattern("strconv.ParseInt(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     constraint_power=0.95,
+                     effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     description="ParseInt — numeric output"),
+    SanitizerPattern("filepath.Base(", clears_for=["path_traversal"], constraint_power=0.90,
+                     effective_for=["path_traversal"], description="filepath.Base — strips directory"),
+    SanitizerPattern("template.HTMLEscapeString(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"], description="HTML escaping"),
+]
+
+
+# ─── Ruby ─────────────────────────────────────────────────────────────────
+
+RUBY_TAINT_SOURCES: list[SourcePattern] = [
+    SourcePattern("params[", source_type="http_param", description="Rails params"),
+    SourcePattern("params.require(", source_type="http_param", description="Rails strong params"),
+    SourcePattern("cookies[", source_type="http_cookie", description="Rails cookies"),
+    SourcePattern("request.headers[", source_type="http_header", description="Rails headers"),
+    SourcePattern("ENV[", source_type="env_var", description="Environment variable"),
+]
+RUBY_TAINT_SINKS: list[SinkPattern] = [
+    SinkPattern("connection.execute(", vuln_class="sqli", severity="critical", description="ActiveRecord raw SQL"),
+    SinkPattern("find_by_sql(", vuln_class="sqli", severity="critical"),
+    SinkPattern("system(", vuln_class="cmdi", severity="critical", description="Kernel#system"),
+    SinkPattern("IO.popen(", vuln_class="cmdi", severity="critical"),
+    SinkPattern("File.open(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("File.read(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("send_file(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("Net::HTTP.get(", vuln_class="ssrf", severity="high"),
+]
+RUBY_SANITIZERS: list[SanitizerPattern] = [
+    SanitizerPattern(".to_i", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     constraint_power=0.95,
+                     effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     description="to_i — numeric coercion"),
+    SanitizerPattern("Integer(", clears_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     constraint_power=0.90,
+                     effective_for=["sqli", "cmdi", "path_traversal", "ssrf", "xss"],
+                     description="Integer() — strict numeric coercion"),
+    SanitizerPattern("ERB::Util.html_escape(", clears_for=["xss"], constraint_power=0.90,
+                     effective_for=["xss"], description="ERB HTML escaping"),
+    SanitizerPattern("File.basename(", clears_for=["path_traversal"], constraint_power=0.90,
+                     effective_for=["path_traversal"], description="File.basename — strips directory"),
+]
+
+
+# ─── C / C++ ──────────────────────────────────────────────────────────────
+
+C_TAINT_SOURCES: list[SourcePattern] = [
+    SourcePattern("getenv(", source_type="env_var", description="Environment variable"),
+    SourcePattern("scanf(", source_type="user_input", description="stdin scanf"),
+    SourcePattern("fgets(", source_type="user_input", description="stdin fgets"),
+    SourcePattern("gets(", source_type="user_input", description="stdin gets (unsafe)"),
+    SourcePattern("recv(", source_type="http_body", description="socket recv"),
+    SourcePattern("req.get(", source_type="http_param", description="C++ web framework param"),
+]
+C_TAINT_SINKS: list[SinkPattern] = [
+    # Command injection
+    SinkPattern("system(", vuln_class="cmdi", severity="critical", description="system() shell"),
+    SinkPattern("popen(", vuln_class="cmdi", severity="critical"),
+    SinkPattern("execlp(", vuln_class="cmdi", severity="critical"),
+    SinkPattern("execvp(", vuln_class="cmdi", severity="critical"),
+    # Buffer overflow (CWE-120/787)
+    SinkPattern("strcpy(", vuln_class="buffer_overflow", severity="high", description="Unbounded string copy"),
+    SinkPattern("strcat(", vuln_class="buffer_overflow", severity="high"),
+    SinkPattern("sprintf(", vuln_class="buffer_overflow", severity="high"),
+    SinkPattern("gets(", vuln_class="buffer_overflow", severity="critical", description="gets() — never safe"),
+    SinkPattern("memcpy(", vuln_class="buffer_overflow", severity="medium"),
+    # Path traversal
+    SinkPattern("fopen(", vuln_class="path_traversal", severity="high"),
+    # SQL injection (C/C++ DB APIs)
+    SinkPattern("mysql_query(", vuln_class="sqli", severity="critical"),
+    SinkPattern("PQexec(", vuln_class="sqli", severity="critical"),
+    SinkPattern("sqlite3_exec(", vuln_class="sqli", severity="critical"),
+    SinkPattern("->query(", vuln_class="sqli", severity="high", description="C++ DB query method"),
+]
+C_SANITIZERS: list[SanitizerPattern] = [
+    SanitizerPattern("atoi(", clears_for=["sqli", "cmdi", "path_traversal", "buffer_overflow"],
+                     constraint_power=0.90,
+                     effective_for=["sqli", "cmdi", "path_traversal", "buffer_overflow"],
+                     description="atoi — numeric output"),
+    SanitizerPattern("strtol(", clears_for=["sqli", "cmdi", "path_traversal", "buffer_overflow"],
+                     constraint_power=0.90,
+                     effective_for=["sqli", "cmdi", "path_traversal", "buffer_overflow"],
+                     description="strtol — numeric output"),
+    SanitizerPattern("snprintf(", clears_for=["buffer_overflow"], constraint_power=0.75,
+                     effective_for=["buffer_overflow"], description="snprintf — bounded write"),
+    SanitizerPattern("strncpy(", clears_for=["buffer_overflow"], constraint_power=0.60,
+                     effective_for=["buffer_overflow"], description="strncpy — bounded (still needs null-term)"),
+]
+
+
+# ─── Rust ─────────────────────────────────────────────────────────────────
+
+RUST_TAINT_SOURCES: list[SourcePattern] = [
+    SourcePattern(".param(", source_type="http_param", description="Web framework path param"),
+    SourcePattern("req.query(", source_type="http_param", description="Query param"),
+    SourcePattern("std::env::var(", source_type="env_var", description="Environment variable"),
+    SourcePattern("env::var(", source_type="env_var", description="Environment variable"),
+]
+RUST_TAINT_SINKS: list[SinkPattern] = [
+    SinkPattern("Command::new(", vuln_class="cmdi", severity="critical", description="std::process::Command"),
+    SinkPattern("sqlx::query(", vuln_class="sqli", severity="high"),
+    SinkPattern("diesel::sql_query(", vuln_class="sqli", severity="high"),
+    SinkPattern("File::open(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("fs::read(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("fs::read_to_string(", vuln_class="path_traversal", severity="high"),
+    SinkPattern("reqwest::get(", vuln_class="ssrf", severity="high"),
+]
+RUST_SANITIZERS: list[SanitizerPattern] = [
+    SanitizerPattern("parse::<", clears_for=["sqli", "cmdi", "path_traversal", "ssrf"],
+                     constraint_power=0.95,
+                     effective_for=["sqli", "cmdi", "path_traversal", "ssrf"],
+                     description="typed parse (e.g. parse::<i32>) — numeric output"),
+]
+
+
+# ─── Bash ─────────────────────────────────────────────────────────────────
+
+BASH_TAINT_SOURCES: list[SourcePattern] = [
+    SourcePattern("$1", source_type="cli_arg", description="Positional parameter"),
+    SourcePattern("$2", source_type="cli_arg", description="Positional parameter"),
+    SourcePattern("$QUERY_STRING", source_type="http_param", description="CGI query string"),
+    SourcePattern("read ", source_type="user_input", description="read builtin"),
+]
+BASH_TAINT_SINKS: list[SinkPattern] = [
+    SinkPattern("eval ", vuln_class="cmdi", severity="critical", description="eval of untrusted input"),
+    SinkPattern("bash -c", vuln_class="cmdi", severity="critical"),
+    SinkPattern("sh -c", vuln_class="cmdi", severity="critical"),
+]
+BASH_SANITIZERS: list[SanitizerPattern] = [
+    SanitizerPattern("declare -i", clears_for=["cmdi"], constraint_power=0.85,
+                     effective_for=["cmdi"], description="integer-typed variable"),
+]
+
+
 # ─── Additional Python vuln class patterns ─────────────────────────────────
 
 # CWE-601: Open Redirect
