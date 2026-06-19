@@ -105,6 +105,10 @@ VEXIS result: **CWE-89 CRITICAL** · Source: `rate_limiter.py:2` · Sink: `logge
 
 **Requirements:** Docker + Docker Compose. No other local dependencies.
 
+**Windows one-click:** run **`run.bat`** — it generates a `.env` with strong local-dev
+secrets on first run and brings the whole stack up. The manual steps below are
+equivalent (and what to follow on macOS/Linux).
+
 The stack now **fails closed**: compose requires `JWT_SECRET` and `MINIO_SECRET_KEY`
 (it won't start with them unset), so a one-time `.env` is required even for local dev.
 
