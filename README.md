@@ -101,22 +101,38 @@ VEXIS result: **CWE-89 CRITICAL** · Source: `rate_limiter.py:2` · Sink: `logge
 
 ---
 
-## Quick start
+## How to run
 
-VEXIS runs with a **single command** — no manual `.env` editing required. The compose
-file ships safe local-dev defaults for every secret (MinIO/JWT/NextAuth), so the stack
-comes up out of the box. Create a `.env` only to override them:
+**Requirements:** Docker + Docker Compose. No other local dependencies.
+
+The stack now **fails closed**: compose requires `JWT_SECRET` and `MINIO_SECRET_KEY`
+(it won't start with them unset), so a one-time `.env` is required even for local dev.
 
 ```bash
 git clone https://github.com/Mananshah237/VEXIS
 cd VEXIS
 
-# Start everything (api, celery worker, frontend, postgres, redis, minio)
+# 1. Create your env file from the template
+cp .env.example .env
+
+# 2. Fill in the three required secrets (the rest have working dev defaults):
+#    JWT_SECRET      python -c "import secrets; print(secrets.token_hex(32))"
+#    MINIO_SECRET_KEY python -c "import secrets; print(secrets.token_urlsafe(32))"
+#    ENCRYPTION_KEY  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#    (ENCRYPTION_KEY may be left blank in dev — VEXIS_ENV=dev relaxes that guard —
+#     but it is REQUIRED once you set VEXIS_ENV=production.)
+
+# 3. Start everything (api, celery worker, frontend, postgres, redis, minio)
 docker compose up --build -d
 
 # Frontend:  http://localhost:3000
 # API:       http://localhost:8000/health   ->  {"status":"ok"}
 ```
+
+> **Production:** set `VEXIS_ENV=production`. The backend then refuses to boot with an
+> empty/weak `JWT_SECRET`, `MINIO_SECRET_KEY`, or `ENCRYPTION_KEY` (fail-closed guard in
+> `config.validate_secrets`). All API endpoints require authentication — sign in with
+> GitHub, or send `Authorization: Bearer <vexis-jwt>` / `X-VEXIS-API-Key: <key>`.
 
 **Ports:** web **3000**, API **8000** (plus Postgres 5432, Redis 6379, MinIO 9000/9001).
 These don't collide with the sibling projects — AegisScan (3001/8001) and PhishNet
@@ -133,18 +149,18 @@ dev secret in `.env` with strong random values.
 > (outside the `./backend` bind mount) so dependencies aren't shadowed at runtime; the
 > compose file no longer carries the obsolete `version:` key.
 
-**Multi-file scan via API** (use `=== FILE: name.py ===` separators):
+**Multi-file scan via API** (use `=== FILE: name.py ===` separators). Scanning now
+requires authentication, so pass your VEXIS JWT (or `X-VEXIS-API-Key: <key>`):
 
 ```bash
 curl -s -X POST http://localhost:8000/api/v1/scan \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VEXIS_JWT" \
   -d '{
     "source_type": "raw_code",
     "source": "# === FILE: rate_limiter.py ===\ndef check_rate_limit(request):\n    client_id = request.headers.get(\"X-Client-ID\")\n    request.state.client_id = client_id\n\n# === FILE: logger.py ===\nimport sqlite3\ndef log_search(client_id, query):\n    db = sqlite3.connect(\"app.db\")\n    db.execute(f\"INSERT INTO log (client_id) VALUES (\'{client_id}\')\") "
   }' | python3 -m json.tool
 ```
-
-**Requirements:** Docker + Docker Compose. No other local dependencies.
 
 ---
 
