@@ -122,10 +122,17 @@ async def generate_user_api_key(
     return {"api_key": raw_key}
 
 
-@router.get("/auth/me")
+class PublicIdentity(BaseModel):
+    id: uuid.UUID
+    login: str
+    email: str | None = None
+
+
+@router.get("/auth/me", response_model=PublicIdentity)
 async def get_me(current_user: dict = Depends(require_user)) -> dict:
     """Return info about the authenticated user."""
-    return current_user
+    return {"id": current_user["id"], "login": current_user["login"],
+            "email": current_user.get("email")}
 
 
 @router.delete("/auth/me")

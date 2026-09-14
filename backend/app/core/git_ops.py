@@ -20,6 +20,7 @@ clones of the same repo, so caching eliminates the 60-80s penalty on
 runs 2 and 3 of benchmark sweeps.
 """
 import hashlib
+import base64
 import os
 import re
 import shutil
@@ -27,6 +28,7 @@ import tempfile
 import asyncio
 import time
 import structlog
+from app.core.source_files import validate_source_tree
 
 log = structlog.get_logger()
 
@@ -74,13 +76,38 @@ async def _get_url_lock(url: str) -> asyncio.Lock:
         return _clone_locks[key]
 
 
-async def _run_git(*args: str) -> tuple[int, str, str]:
+def _authenticated_git_env(token: str) -> dict[str, str]:
+    """Ephemeral HTTP auth: no credentials in arguments, helpers, or remotes."""
+    env = {key: value for key, value in os.environ.items()
+           if not key.upper().startswith(("GIT_CONFIG", "GIT_TRACE", "GIT_CURL_VERBOSE"))}
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    config = [
+        ("http.https://github.com/.extraHeader", f"Authorization: Basic {encoded}"),
+        ("credential.helper", ""),
+        ("http.followRedirects", "false"),
+    ]
+    env.update({"GIT_CONFIG_COUNT": str(len(config)), "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+    for index, (key, value) in enumerate(config):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
+
+
+async def _run_git(*args: str, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         "git", *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await proc.communicate()
+    except BaseException:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise
     return proc.returncode, stdout.decode(), stderr.decode()
 
 
@@ -89,23 +116,32 @@ async def clone_repo(url: str, token: str | None = None) -> str:
     Return path to a fresh temp directory containing the repo.
     Uses a local disk cache to avoid repeated full clones.
 
-    If `token` is given (private repo), clone fresh with an authenticated URL and
+    If `token` is given (private repo), clone fresh with ephemeral HTTP auth and
     SKIP the shared cache — so the token never lands in a cache key/path and
     private code isn't cached under a URL-only key.
     """
     _validate_repo_url(url)
 
+    if token and not url.startswith("https://github.com/"):
+        raise ValueError("GitHub credentials may only be used with github.com")
+
     if token and url.startswith("https://"):
-        auth_url = "https://x-access-token:" + token + "@" + url[len("https://"):]
         tmp_dir = tempfile.mkdtemp(prefix="vexis_scan_")
-        rc, _, err = await asyncio.wait_for(
-            _run_git("clone", "--depth=1", "--single-branch", auth_url, tmp_dir),
-            timeout=120.0,
-        )
+        try:
+            rc, _, err = await asyncio.wait_for(
+                _run_git("clone", "--depth=1", "--single-branch", url, tmp_dir,
+                         env=_authenticated_git_env(token)),
+                timeout=120.0,
+            )
+            if rc == 0:
+                validate_source_tree(tmp_dir)
+        except BaseException:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
         if rc != 0:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            safe_err = err.replace(token, "***") if token else err
-            raise RuntimeError(f"Authenticated git clone failed: {safe_err}")
+            # Do not surface provider diagnostics that might echo credentials.
+            raise RuntimeError(f"Authenticated git clone failed (exit code {rc})")
         log.info("git.clone.private_done", url=url)
         return tmp_dir
 
@@ -154,6 +190,13 @@ async def clone_repo(url: str, token: str | None = None) -> str:
 
     # Copy cached repo to a fresh temp dir for this scan's exclusive use
     tmp_dir = tempfile.mkdtemp(prefix="vexis_scan_")
-    shutil.copytree(cache_dir, tmp_dir, dirs_exist_ok=True)
+    try:
+        validate_source_tree(cache_dir)
+        # Never dereference a link even if the cache changes after validation.
+        shutil.copytree(cache_dir, tmp_dir, dirs_exist_ok=True, symlinks=True)
+        validate_source_tree(tmp_dir)
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
     log.info("git.cache_copy_done", dest=tmp_dir)
     return tmp_dir

@@ -180,7 +180,8 @@ class CodeParser:
         return "python"  # default fallback
 
     def parse_file(self, path: str) -> ParsedFile:
-        source = Path(path).read_text(encoding="utf-8", errors="replace")
+        from app.core.source_files import read_source_text
+        source = read_source_text(path)
         return self.parse_code(source, path=path)
 
     def parse_code(self, code: str, path: str = "<string>") -> ParsedFile:

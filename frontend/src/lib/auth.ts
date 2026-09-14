@@ -37,18 +37,23 @@ export const authOptions: NextAuthOptions = {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ access_token: account.access_token }),
           });
-          if (res.ok) {
-            const data = await res.json();
-            token.vexisToken = data.access_token;
+          if (!res.ok) {
+            throw new Error("Backend authentication failed");
           }
+          const data = await res.json();
+          if (typeof data.access_token !== "string" || !data.access_token) {
+            throw new Error("Backend authentication failed");
+          }
+          token.vexisToken = data.access_token;
         } catch {
-          /* backend unreachable — fall back to anonymous backend access */
+          throw new Error("Unable to sign in to VEXIS. Please try again.");
         }
       }
       return token;
     },
     async session({ session, token }) {
-      (session as any).accessToken = token.accessToken;
+      // Provider credentials stay in the encrypted, HttpOnly JWT cookie.
+      // The session endpoint is browser-visible: expose only the VEXIS token.
       (session as any).vexisToken = token.vexisToken;
       return session;
     },

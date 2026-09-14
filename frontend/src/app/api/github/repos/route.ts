@@ -1,19 +1,18 @@
-import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { NextRequest, NextResponse } from "next/server";
+import { getToken } from "next-auth/jwt";
 
 // Lists the signed-in user's GitHub repositories using their session token.
 // Keeps the OAuth token server-side (never exposed to the browser).
-export async function GET() {
-  const session = await getServerSession(authOptions);
-  const token = (session as any)?.accessToken;
-  if (!token) {
+export async function GET(request: NextRequest) {
+  const jwt = await getToken({ req: request, secret: process.env.NEXTAUTH_SECRET });
+  const token = jwt?.accessToken;
+  if (typeof token !== "string" || !token) {
     return NextResponse.json({ error: "Not signed in with GitHub" }, { status: 401 });
   }
 
   const res = await fetch(
     "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
-    { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } }
+    { cache: "no-store", headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } }
   );
   if (!res.ok) {
     return NextResponse.json(

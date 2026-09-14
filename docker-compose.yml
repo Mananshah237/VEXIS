@@ -4,13 +4,19 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - VEXIS_ENV=${VEXIS_ENV:-dev}
+      - VEXIS_ENV=${VEXIS_ENV:-production}
+      - VEXIS_USE_CELERY=true
+      - VEXIS_SCAN_TIMEOUT_SECONDS=${VEXIS_SCAN_TIMEOUT_SECONDS:-600}
+      - VEXIS_MAX_LLM_CALLS_PER_SCAN=${VEXIS_MAX_LLM_CALLS_PER_SCAN:-100}
       - DATABASE_URL=postgresql+asyncpg://vexis:vexis@postgres:5432/vexis
       - REDIS_URL=redis://redis:6379
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - VEXIS_LOG_LEVEL=INFO
+      # Auth enforcement (backend reads this). Default true; set false in .env for
+      # local dev to allow anonymous access without GitHub OAuth.
+      - AUTH_ENFORCED=${AUTH_ENFORCED:-true}
       # Secrets come from the environment (.env / secret manager). No weak
       # defaults are baked in — set these before deploying outside dev.
       - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env}
@@ -35,7 +41,9 @@ services:
   celery_worker:
     build: ./backend
     environment:
-      - VEXIS_ENV=${VEXIS_ENV:-dev}
+      - VEXIS_ENV=${VEXIS_ENV:-production}
+      - VEXIS_SCAN_TIMEOUT_SECONDS=${VEXIS_SCAN_TIMEOUT_SECONDS:-600}
+      - VEXIS_MAX_LLM_CALLS_PER_SCAN=${VEXIS_MAX_LLM_CALLS_PER_SCAN:-100}
       - DATABASE_URL=postgresql+asyncpg://vexis:vexis@postgres:5432/vexis
       - REDIS_URL=redis://redis:6379
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
@@ -45,6 +53,7 @@ services:
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-vexis}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY in .env}
+      - AUTH_ENFORCED=${AUTH_ENFORCED:-true}
       - VEXIS_USE_CELERY=true
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -70,7 +79,6 @@ services:
       - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET in .env}
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
-      - AUTH_ENFORCED=${AUTH_ENFORCED:-true}
     depends_on:
       - api
     volumes:

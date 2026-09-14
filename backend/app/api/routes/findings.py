@@ -35,7 +35,7 @@ async def list_findings(
         q = q.where(Finding.severity == severity)
     if vuln_class:
         q = q.where(Finding.vuln_class == vuln_class)
-    q = q.order_by(desc(Finding.taint_confidence), desc(Finding.confidence))
+    q = q.order_by(desc(Finding.taint_confidence), desc(Finding.confidence), Finding.id)
     q = q.offset((page - 1) * per_page).limit(per_page)
     result = await db.execute(q)
     findings = result.scalars().all()

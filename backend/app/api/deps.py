@@ -54,7 +54,7 @@ async def get_current_user(
         )
         user = result.scalar_one_or_none()
         if user:
-            return _user_dict(user)
+            return _user_dict(user, "api_key")
         log.warning("auth.api_key.invalid")
         raise _UNAUTHORIZED  # invalid key — reject, do not downgrade
 
@@ -72,7 +72,7 @@ async def get_current_user(
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
         if user:
-            return _user_dict(user)
+            return _user_dict(user, "jwt")
         # Valid signature but the user no longer exists.
         log.warning("auth.jwt.unknown_user", user_id=str(user_id))
         raise _UNAUTHORIZED
@@ -85,20 +85,50 @@ async def get_current_user(
     return None  # no credentials — anonymous (only allowed on public routes)
 
 
+# Fixed synthetic user used ONLY when settings.auth_enforced is false (local dev).
+# Every anonymous request resolves to this same id, so owner-scoped queries stay
+# coherent (create -> list -> view all match). scan.user_id has no FK, so no DB row
+# is needed. Never reachable when AUTH_ENFORCED is true (the default).
+_DEV_USER = {
+    "id": uuid.UUID("00000000-0000-0000-0000-0000000000de"),
+    "login": "dev-local",
+    "email": None,
+    "auth_method": "dev",
+}
+
+
 async def require_user(
     current_user: Optional[dict] = Depends(get_current_user),
 ) -> dict:
-    """Require an authenticated user; raise 401 for anonymous callers."""
-    if not current_user:
-        raise _UNAUTHORIZED
+    """Require an authenticated user; raise 401 for anonymous callers.
+
+    When ``AUTH_ENFORCED=false`` (local dev only), an anonymous request is
+    resolved to a fixed dev user instead of being rejected, so the UI works
+    without GitHub OAuth. ``validate_secrets`` forbids this outside dev.
+    """
+    if current_user:
+        return current_user
+    from app.config import settings
+    if not settings.auth_enforced:
+        log.warning("auth.dev_bypass", detail="AUTH_ENFORCED=false — anonymous request resolved to dev user")
+        return dict(_DEV_USER)
+    raise _UNAUTHORIZED
+
+
+async def require_repository_write(
+    current_user: dict = Depends(require_user),
+) -> dict:
+    """Stored repository write credentials require a signed-in web user."""
+    if current_user.get("auth_method") != "jwt":
+        raise HTTPException(status_code=403, detail="Sign in to open pull requests; API keys cannot write repositories")
     return current_user
 
 
-def _user_dict(user) -> dict:
-    """Project a User ORM row into the dict callers expect, decrypting secrets."""
+def _user_dict(user, auth_method: str) -> dict:
+    """Authentication carries identity only; credentials are loaded on demand."""
     return {
         "id": user.id,
         "login": user.github_login,
         "email": user.email,
-        "github_token": user.github_token_plain,
+        "auth_method": auth_method,
     }

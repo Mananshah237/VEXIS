@@ -114,8 +114,10 @@ async def _run_scan_impl(scan_id: str) -> None:
                 _owner = (await db.execute(select(User).where(User.id == scan.user_id))).scalar_one_or_none()
                 github_token = _owner.github_token_plain if _owner else None
             source_path = await _fetch_source(scan, github_token)
-            if scan.source_type == "raw_code":
+            if scan.source_type in {"raw_code", "github_url"}:
                 _temp_dir = source_path
+            from app.core.source_files import validate_source_tree
+            validate_source_tree(source_path)
 
             # Snapshot source code to MinIO (non-blocking; failure does not abort scan)
             try:
@@ -189,28 +191,12 @@ async def _run_scan_impl(scan_id: str) -> None:
                     pass  # can't count — include file and let parser handle it
                 py_files.append(f)
 
-            # Incremental mode: skip files that haven't changed since the last scan
+            # Until complete dependency summaries exist, incremental requests
+            # must retain full-project context and avoid unscoped baselines.
             incremental_mode = (scan.config or {}).get("incremental", False)
             incremental_skipped = 0
-            if incremental_mode and py_files:
-                try:
-                    from app.core.incremental import get_changed_files_for_scan, save_manifest, compute_manifest
-                    changed = await get_changed_files_for_scan(source_path, scan.source_ref, scan_id, db)
-                    if changed is not None:
-                        original_count = len(py_files)
-                        py_files = [f for f in py_files if str(f.relative_to(source_path)) in changed]
-                        incremental_skipped = original_count - len(py_files)
-                        log.info(
-                            "incremental.filtered",
-                            scan_id=scan_id,
-                            kept=len(py_files),
-                            skipped=incremental_skipped,
-                        )
-                    # Save new manifest regardless (so next scan can compare against this one)
-                    new_manifest = compute_manifest(source_path)
-                    await save_manifest(scan_id, new_manifest)
-                except Exception as inc_err:
-                    log.warning("incremental.failed", scan_id=scan_id, error=str(inc_err))
+            if incremental_mode:
+                log.info("incremental.full_scan_fallback", scan_id=scan_id)
 
             scan.stats = {
                 "files_found": len(all_py_files),
@@ -218,6 +204,8 @@ async def _run_scan_impl(scan_id: str) -> None:
                 "taint_paths": 0,
                 "skipped_large": skipped_large,
                 "incremental_skipped": incremental_skipped,
+                "analysis_mode": "full",
+                "incremental_requested": bool(incremental_mode),
             }
             await db.commit()
 

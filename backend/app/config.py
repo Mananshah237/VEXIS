@@ -1,4 +1,5 @@
 import os
+from pydantic import Field, AliasChoices, AliasGenerator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
@@ -21,7 +22,7 @@ _KNOWN_WEAK_SECRETS = {
 # Paths are matched as substrings against the full file path (case-insensitive).
 # Filenames are matched against the basename only.
 # Override via VEXIS_EXCLUDED_PATH_PATTERNS / VEXIS_EXCLUDED_FILENAME_PATTERNS
-# env vars (comma-separated lists).
+# env vars (JSON arrays).
 # ---------------------------------------------------------------------------
 DEFAULT_EXCLUDED_PATH_PATTERNS: List[str] = [
     "/node_modules/",
@@ -56,11 +57,19 @@ DEFAULT_MAX_FILE_BYTES: int = 200_000  # 200 KB
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore",
+        populate_by_name=True,
+        alias_generator=AliasGenerator(
+            validation_alias=lambda name: AliasChoices(f"VEXIS_{name.upper()}", name.upper())
+        ),
+    )
 
     # Deployment environment. Set VEXIS_ENV=production (or anything other than
-    # dev/test/local) to enforce the secret-strength startup guard.
-    env: str = "dev"
+    # dev/test/local) to enforce the secret-strength startup guard. The field is
+    # named `env`, so it is read from VEXIS_ENV (primary) or ENV (fallback) —
+    # without this alias, VEXIS_ENV was silently ignored and the guard never ran.
+    env: str = Field("production", validation_alias=AliasChoices("VEXIS_ENV", "ENV"))
 
     # Database
     database_url: str = "postgresql+asyncpg://vexis:vexis@localhost:5432/vexis"
@@ -76,14 +85,14 @@ class Settings(BaseSettings):
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:3001"]
 
     # Scan limits
-    max_repo_size_mb: int = 500
-    max_llm_calls_per_scan: int = 100
-    scan_timeout_seconds: int = 600
+    max_repo_size_mb: int = Field(500, gt=0)
+    max_llm_calls_per_scan: int = Field(100, ge=0)
+    scan_timeout_seconds: int = Field(600, gt=0)
 
     # File exclusion — vendored / minified / generated files
     excluded_path_patterns: List[str] = DEFAULT_EXCLUDED_PATH_PATTERNS
     excluded_filename_patterns: List[str] = DEFAULT_EXCLUDED_FILENAME_PATTERNS
-    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
+    max_file_bytes: int = Field(DEFAULT_MAX_FILE_BYTES, gt=0)
 
     # Logging
     log_level: str = "INFO"
@@ -110,6 +119,12 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24 * 7  # 7 days
 
+    # Auth enforcement. Default TRUE (secure): every protected endpoint requires a
+    # valid JWT / API key. Set AUTH_ENFORCED=false ONLY for local development —
+    # anonymous requests are then resolved to a fixed synthetic "dev" user so the
+    # UI works without GitHub OAuth. Never set false in a deployed environment.
+    auth_enforced: bool = True
+
     # Application-layer encryption key for secrets at rest (GitHub OAuth tokens,
     # API keys). 32-byte url-safe base64 Fernet key. REQUIRED in production.
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -129,17 +144,29 @@ class Settings(BaseSettings):
         if self.is_dev:
             return
         problems: List[str] = []
+        if not self.auth_enforced:
+            problems.append(
+                "AUTH_ENFORCED is false — anonymous access is only allowed in dev. "
+                "Unset it (or set true) outside local development."
+            )
         if self.jwt_secret.strip().lower() in _KNOWN_WEAK_SECRETS or len(self.jwt_secret) < 32:
             problems.append(
                 "JWT_SECRET is empty, a known dev default, or shorter than 32 chars"
             )
-        if self.minio_secret_key.strip().lower() in _KNOWN_WEAK_SECRETS:
-            problems.append("MINIO_SECRET_KEY is empty or a known dev default")
+        if (self.minio_secret_key.strip().lower() in _KNOWN_WEAK_SECRETS
+                or len(self.minio_secret_key) < 16):
+            problems.append("MINIO_SECRET_KEY is a known dev default or shorter than 16 chars")
         if not self.encryption_key.strip():
             problems.append(
                 "ENCRYPTION_KEY is not set — secrets-at-rest (GitHub tokens/API keys) "
                 "cannot be encrypted. Generate one with cryptography.fernet.Fernet."
             )
+        else:
+            from cryptography.fernet import Fernet
+            try:
+                Fernet(self.encryption_key.strip().encode())
+            except (ValueError, TypeError):
+                problems.append("ENCRYPTION_KEY is not a valid Fernet key")
         if problems:
             raise RuntimeError(
                 "Refusing to start with insecure configuration (VEXIS_ENV="

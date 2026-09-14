@@ -116,6 +116,7 @@ def poll_scan(scan_id: str) -> dict | None:
         while time.time() < deadline:
             try:
                 resp = client.get(f"{API_URL}/api/v1/scan/{scan_id}", headers=headers)
+                resp.raise_for_status()
                 data = resp.json()
                 status = data.get("status", "unknown")
 
@@ -139,11 +140,16 @@ def poll_scan(scan_id: str) -> dict | None:
     return None
 
 
+class FindingsFetchError(RuntimeError):
+    """The action could not obtain a complete, valid result set."""
+
+
 def fetch_findings(scan_id: str) -> list[dict]:
-    """Fetch all findings for a completed scan."""
+    """Fetch every page or raise; partial results must never pass a security gate."""
     headers = {"X-VEXIS-API-Key": API_KEY}
     findings = []
     page = 1
+    seen_ids = set()
     with httpx.Client(timeout=15) as client:
         while True:
             try:
@@ -152,15 +158,34 @@ def fetch_findings(scan_id: str) -> list[dict]:
                     params={"page": page, "per_page": 100},
                     headers=headers,
                 )
+                resp.raise_for_status()
                 data = resp.json()
-                batch = data.get("findings", [])
+                if not isinstance(data, dict):
+                    raise ValueError("Expected a findings response object")
+                if (type(data.get("page")) is not int or data["page"] != page
+                        or type(data.get("per_page")) is not int or data["per_page"] != 100):
+                    raise ValueError("Missing or inconsistent pagination metadata")
+                batch = data.get("findings")
+                if not isinstance(batch, list) or len(batch) > 100:
+                    raise ValueError("Invalid or missing findings list")
+                for finding in batch:
+                    if not isinstance(finding, dict):
+                        raise ValueError("Invalid finding object")
+                    finding_id = finding.get("id")
+                    if not isinstance(finding_id, str) or not finding_id:
+                        raise ValueError("Missing finding identity")
+                    if finding_id in seen_ids:
+                        raise ValueError("Duplicate finding across result pages")
+                    severity = finding.get("severity")
+                    if not isinstance(severity, str) or severity not in SEVERITY_RANK:
+                        raise ValueError("Invalid or missing finding severity")
+                    seen_ids.add(finding_id)
                 findings.extend(batch)
                 if len(batch) < 100:
                     break
                 page += 1
             except Exception as e:
-                gha_log("warning", f"Failed to fetch findings page {page}: {e}")
-                break
+                raise FindingsFetchError(f"Failed to fetch findings page {page}: {e}") from e
     return findings
 
 
@@ -233,7 +258,11 @@ def main() -> int:
         return 1
 
     # Step 4: Fetch findings
-    findings = fetch_findings(scan_id)
+    try:
+        findings = fetch_findings(scan_id)
+    except FindingsFetchError as e:
+        gha_log("error", f"Results unavailable or incomplete; failing the check. {e}")
+        return 1
     set_output("findings-count", str(len(findings)))
     set_output("critical-count", str(sum(1 for f in findings if f.get("severity") == "critical")))
     set_output("high-count", str(sum(1 for f in findings if f.get("severity") == "high")))

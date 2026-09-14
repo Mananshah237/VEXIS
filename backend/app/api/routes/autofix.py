@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.finding import Finding
 from app.models.scan import Scan
-from app.api.deps import require_user
+from app.api.deps import require_user, require_repository_write
+from app.models.user import User
 from app.exploit.autofix_generator import AutoFixGenerator
 from app.exploit.pr_generator import PRGenerator, parse_repo_url
 
@@ -103,13 +104,17 @@ async def open_pull_request(
     finding_id: str,
     body: PRRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(require_user),
+    current_user: dict = Depends(require_repository_write),
 ) -> dict:
     finding = await _load_owned_finding(finding_id, db, current_user)
     scan_result = await db.execute(select(Scan).where(Scan.id == finding.scan_id))
     scan = scan_result.scalar_one_or_none()
 
-    token = body.github_token or (current_user or {}).get("github_token")
+    token = body.github_token
+    if not token:
+        owner_result = await db.execute(select(User).where(User.id == current_user["id"]))
+        owner = owner_result.scalar_one_or_none()
+        token = owner.github_token_plain if owner else None
     if not token:
         raise HTTPException(status_code=401, detail="GitHub not connected — sign in with GitHub to open a PR")
 

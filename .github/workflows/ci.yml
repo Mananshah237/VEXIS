@@ -7,6 +7,17 @@ on:
     branches: [main]
 
 jobs:
+  action-test:
+    name: Action regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install httpx pytest
+      - run: python -m pytest action/tests -v
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -91,6 +102,12 @@ jobs:
           GOOGLE_API_KEY: placeholder-not-used-in-unit-tests
         run: uv run pytest tests/test_api.py -v
 
+      - name: Run security boundary regressions
+        working-directory: backend
+        env:
+          VEXIS_ENV: test
+        run: uv run pytest ../tests -v
+
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
@@ -113,3 +130,7 @@ jobs:
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8000
         run: npm run build
+
+      - name: Authentication regression tests
+        working-directory: frontend
+        run: npm test

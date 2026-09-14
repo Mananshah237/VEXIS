@@ -37,6 +37,7 @@ railway up --service vexis-api
 
 Set environment variables in the Railway dashboard → vexis-api → Variables:
 ```
+VEXIS_ENV=production
 GOOGLE_API_KEY=<your Gemini key>
 ANTHROPIC_API_KEY=<your Claude key>   # optional fallback
 DATABASE_URL=<auto-set by Railway Postgres plugin>
@@ -47,14 +48,15 @@ VEXIS_LOG_LEVEL=INFO
 GITHUB_CLIENT_ID=<your GitHub OAuth App client ID>
 GITHUB_CLIENT_SECRET=<your GitHub OAuth App client secret>
 JWT_SECRET=<random 32+ char string>
+ENCRYPTION_KEY=<Fernet key generated with cryptography.fernet.Fernet.generate_key()>
 
-# CORS — comma-separated list of allowed frontend origins
+# CORS — JSON array of allowed frontend origins
 CORS_ORIGINS=["https://your-frontend.up.railway.app"]
 
 # Object storage — see "Storage options" section below
 MINIO_ENDPOINT=<see below>
 MINIO_ACCESS_KEY=<see below>
-MINIO_SECRET_KEY=<see below>
+MINIO_SECRET_KEY=<random secret of at least 16 characters>
 MINIO_SECURE=true
 ```
 

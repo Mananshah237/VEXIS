@@ -1,10 +1,22 @@
 """Celery application instance for VEXIS background scan tasks."""
 from __future__ import annotations
-import os
 from celery import Celery
+from celery.signals import worker_init
+from app.config import settings
+import structlog
+
+
+@worker_init.connect
+def validate_worker_settings(**kwargs):
+    structlog.get_logger().info("worker.startup", env=settings.env)
+    try:
+        settings.validate_secrets()
+    except RuntimeError as exc:
+        # Celery signals swallow ordinary exceptions; SystemExit must stop startup.
+        raise SystemExit(str(exc)) from exc
 
 # Use the same Redis URL as the rest of the app
-_REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+_REDIS_URL = settings.redis_url
 
 celery_app = Celery(
     "vexis",

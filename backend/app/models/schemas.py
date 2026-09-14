@@ -9,7 +9,7 @@ class ScanConfig(BaseModel):
     vuln_classes: list[str] = ["sqli", "cmdi", "path_traversal"]
     max_llm_calls: int = 50
     confidence_threshold: float = 0.5
-    incremental: bool = False  # if True, skip files unchanged since last scan of same source_ref
+    incremental: bool = False  # accepted for compatibility; currently runs full analysis
 
 
 class ScanCreateRequest(BaseModel):
