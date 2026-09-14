@@ -20,6 +20,7 @@ import asyncio
 import tempfile
 import os
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 import structlog
@@ -425,13 +426,16 @@ async def _run_scan_impl(scan_id: str) -> None:
 
             async def _generate_exploit_scripts_task():
                 from app.exploit.script_generator import ExploitScriptGenerator
-                gen = ExploitScriptGenerator()
+                # Refinement draws on the same metered LLM budget as every other pass.
+                gen = ExploitScriptGenerator(budget=budget)
                 target_findings = [
                     f for f in all_findings
                     if f.vuln_class not in ("chain",) and not getattr(f, "is_false_positive", False)
                     and f.exploit_script is None
                 ]
+                generated = 0
                 async def _gen_one(f):
+                    nonlocal generated
                     try:
                         poc = f.poc or {}
                         script = await gen.generate(
@@ -446,17 +450,23 @@ async def _run_scan_impl(scan_id: str) -> None:
                             attack_vector=poc.get("attack_vector", ""),
                         )
                         f.exploit_script = script.code
+                        generated += 1
                     except Exception as eg_err:
                         log.warning("exploit_gen.failed", finding_id=str(f.id), error=str(eg_err))
                 await asyncio.gather(*[_gen_one(f) for f in target_findings], return_exceptions=True)
-                return len(target_findings)
+                # Count only scripts that were actually produced, not targets attempted.
+                return generated
 
+            discovery_status = {"status": "disabled"}
             async def _run_discovery_task():
                 if not discovery_mode:
                     return []
                 from app.reasoning.pass_4_discovery import BusinessLogicDiscoveryPass
                 disc = BusinessLogicDiscoveryPass(budget=budget)
-                return await disc.run(parsed_files, source_path)
+                try:
+                    return await disc.run(parsed_files, source_path)
+                finally:
+                    discovery_status["status"] = disc.status
 
             async def _run_semgrep_task():
                 from app.analysis.semgrep_runner import run_semgrep, compute_differential
@@ -565,7 +575,9 @@ async def _run_scan_impl(scan_id: str) -> None:
                             sink_file=so_finding.sink_file,
                             sink_line=so_finding.sink_line,
                             sink_code=so_finding.sink_code,
-                            taint_path={"type": "second_order", "read_file": so_finding.read_file, "read_line": so_finding.read_line},
+                            taint_path={"type": "second_order", "heuristic": True,
+                                        "read_file": so_finding.read_file, "read_line": so_finding.read_line,
+                                        "db_table": so_finding.db_table},
                             attack_flow={"nodes": [], "edges": [], "type": "second_order"},
                             triage_status="open",
                         )
@@ -645,6 +657,7 @@ async def _run_scan_impl(scan_id: str) -> None:
                 "llm_calls": budget.calls_made,
                 "taint_only_findings": taint_only_count,
                 "discovery_findings": discovery_saved,
+                "discovery_status": discovery_status["status"],
                 "exploit_scripts_generated": exploit_count if not isinstance(exploit_count, BaseException) else 0,
             }
             await db.commit()
@@ -723,6 +736,67 @@ async def _update_status(db, scan: Scan, status: ScanStatus, progress: float | N
     await db.commit()
 
 
+# Default file extension per supported language, for single-snippet submissions
+# whose language is chosen in the UI rather than by filename.
+_LANG_DEFAULT_EXT = {
+    "python": ".py", "javascript": ".js", "typescript": ".ts", "tsx": ".tsx",
+    "jsx": ".jsx", "java": ".java", "go": ".go", "ruby": ".rb", "c": ".c",
+    "cpp": ".cpp", "rust": ".rs", "bash": ".sh",
+}
+
+
+def _safe_relative_path(filename: str, root: str) -> str:
+    """Normalize a submitted path under root, rejecting traversal and absolutes."""
+    cleaned = filename.strip().replace("\\", "/")
+    if not cleaned or cleaned.startswith("/") or ":" in cleaned.split("/")[0]:
+        raise ValueError(f"Unsafe file path in submission: {filename!r}")
+    parts = [p for p in cleaned.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise ValueError(f"Path traversal in submission: {filename!r}")
+    rel = os.path.join(*parts)
+    root_abs = os.path.abspath(root)
+    dest = os.path.abspath(os.path.join(root_abs, rel))
+    if os.path.commonpath([root_abs, dest]) != root_abs:
+        raise ValueError(f"Path escapes scan root: {filename!r}")
+    return rel
+
+
+def _write_raw_code(code: str, tmp_dir: str, language: str | None) -> None:
+    """Materialize submitted code, preserving relative paths and language identity."""
+    from app.ingestion.parser import _EXT_MAP
+
+    parts = _FILE_MARKER_RE.split(code)
+    if len(parts) > 1:
+        seen: set[str] = set()
+        i = 1
+        while i + 1 < len(parts):
+            rel = _safe_relative_path(parts[i], tmp_dir)
+            content = parts[i + 1]
+            # Reject unsupported formats rather than silently renaming to .py —
+            # a mislabeled file would otherwise be parsed as the wrong language.
+            if Path(rel).suffix.lower() not in _EXT_MAP:
+                raise ValueError(f"Unsupported file type in submission: {rel!r}")
+            key = rel.replace("\\", "/").lower()
+            if key in seen:
+                raise ValueError(f"Duplicate file path in submission: {rel!r}")
+            seen.add(key)
+            dest = os.path.join(tmp_dir, rel)
+            os.makedirs(os.path.dirname(dest) or tmp_dir, exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            log.info("scan.multi_file_written", file=rel)
+            i += 2
+        return
+
+    # Single snippet: derive the extension from the declared language, defaulting
+    # to Python, so the UI's language selection is honored.
+    ext = _LANG_DEFAULT_EXT.get((language or "").lower(), ".py")
+    code_path = os.path.join(tmp_dir, f"scan_target{ext}")
+    with open(code_path, "w", encoding="utf-8") as fh:
+        fh.write(code)
+    log.info("scan.raw_code_written", path=code_path)
+
+
 async def _fetch_source(scan: Scan, github_token: str | None = None) -> str:
     """Returns path to directory containing source code on disk."""
     from app.core.git_ops import clone_repo
@@ -736,28 +810,11 @@ async def _fetch_source(scan: Scan, github_token: str | None = None) -> str:
     elif scan.source_type == "raw_code":
         code = scan.source_ref
         tmp_dir = tempfile.mkdtemp(prefix="vexis_")
-
-        parts = _FILE_MARKER_RE.split(code)
-        if len(parts) > 1:
-            i = 1
-            while i + 1 < len(parts):
-                filename = parts[i].strip()
-                content = parts[i + 1]
-                safe_name = Path(filename).name
-                _supported_exts = {".py", ".js", ".ts", ".jsx", ".tsx"}
-                if not any(safe_name.endswith(ext) for ext in _supported_exts):
-                    safe_name += ".py"
-                file_path = os.path.join(tmp_dir, safe_name)
-                with open(file_path, "w", encoding="utf-8") as fh:
-                    fh.write(content)
-                log.info("scan.multi_file_written", file=safe_name)
-                i += 2
-        else:
-            code_path = os.path.join(tmp_dir, "scan_target.py")
-            with open(code_path, "w", encoding="utf-8") as fh:
-                fh.write(code)
-            log.info("scan.raw_code_written", path=code_path)
-
+        try:
+            _write_raw_code(code, tmp_dir, scan.language)
+        except BaseException:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
         return tmp_dir
 
     elif scan.source_type == "directory":

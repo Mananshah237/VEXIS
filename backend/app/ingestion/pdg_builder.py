@@ -70,10 +70,15 @@ class PDGBuilder:
         graph = nx.DiGraph()
         self._parsed = parsed
         self._counter = 0
-        self._var_defs: dict[str, list[str]] = {}  # var_name -> [node_ids]
+        # (scope_id, var_name) -> [node_ids]. Scoping definitions to their
+        # enclosing function prevents identically-named locals in unrelated
+        # functions from being wired together as a single dataflow.
+        self._var_defs: dict[tuple[str, str], list[str]] = {}
+        # node_id -> enclosing function scope id ("module" at top level)
+        self._scope_of: dict[str, str] = {}
 
         root = parsed.root
-        self._visit_node(graph, root, parent_id=None)
+        self._visit_node(graph, root, parent_id=None, scope="module")
         self._add_data_deps(graph)
 
         return PDG(graph=graph, file=parsed.path)
@@ -82,11 +87,13 @@ class PDGBuilder:
         self._counter += 1
         return f"n{self._counter}"
 
-    def _visit_node(self, graph: nx.DiGraph, node: Any, parent_id: Optional[str]) -> Optional[str]:
+    def _visit_node(
+        self, graph: nx.DiGraph, node: Any, parent_id: Optional[str], scope: str
+    ) -> Optional[str]:
         node_type = self._classify_node(node)
         if node_type is None:
             for child in node.children:
-                self._visit_node(graph, child, parent_id)
+                self._visit_node(graph, child, parent_id, scope)
             return None
 
         node_id = self._next_id()
@@ -106,29 +113,35 @@ class PDGBuilder:
             function_calls=self._extract_calls(node),
         )
         graph.add_node(node_id, data=pdg_node)
+        self._scope_of[node_id] = scope
 
-        # Track variable definitions
+        # Definitions belong to the scope that contains them.
         for var in pdg_node.variables_defined:
-            if var not in self._var_defs:
-                self._var_defs[var] = []
-            self._var_defs[var].append(node_id)
+            self._var_defs.setdefault((scope, var), []).append(node_id)
 
         if parent_id:
             graph.add_edge(parent_id, node_id, edge_type=EdgeType.CONTROL_DEP)
 
+        # A function definition opens a new variable scope for its body.
+        child_scope = node_id if node_type == NodeType.FUNCTION_DEF else scope
         for child in node.children:
-            self._visit_node(graph, child, node_id)
+            self._visit_node(graph, child, node_id, child_scope)
 
         return node_id
 
     def _add_data_deps(self, graph: nx.DiGraph) -> None:
         for node_id in graph.nodes:
             pdg_node: PDGNode = graph.nodes[node_id]["data"]
+            scope = self._scope_of.get(node_id, "module")
             for var in pdg_node.variables_used:
-                if var in self._var_defs:
-                    for def_id in self._var_defs[var]:
-                        if def_id != node_id:
-                            graph.add_edge(def_id, node_id, edge_type=EdgeType.DATA_DEP, var=var)
+                # Resolve against the use's own function scope first, then fall
+                # back to module scope for genuine module-level globals.
+                def_ids = self._var_defs.get((scope, var))
+                if def_ids is None and scope != "module":
+                    def_ids = self._var_defs.get(("module", var))
+                for def_id in def_ids or ():
+                    if def_id != node_id:
+                        graph.add_edge(def_id, node_id, edge_type=EdgeType.DATA_DEP, var=var)
 
     def _classify_node(self, node: Any) -> Optional[NodeType]:
         type_map = {

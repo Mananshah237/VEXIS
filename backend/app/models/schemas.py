@@ -10,6 +10,7 @@ class ScanConfig(BaseModel):
     max_llm_calls: int = 50
     confidence_threshold: float = 0.5
     incremental: bool = False  # accepted for compatibility; currently runs full analysis
+    discovery_mode: bool = False  # LLM business-logic pass (experimental, advisory)
 
 
 class ScanCreateRequest(BaseModel):

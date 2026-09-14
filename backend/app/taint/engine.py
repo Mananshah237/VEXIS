@@ -259,9 +259,13 @@ class TaintEngine:
                         sanitizer=sanitizer.pattern,
                         constraint=sanitizer.constraint_power,
                     )
-                    # Early termination: if even the worst-case path danger drops below
-                    # threshold, stop propagating — no sink of any type would fire
-                    if new_danger < self._danger_threshold:
+                    # Early termination is only safe for a sanitizer that neutralizes
+                    # taint for EVERY vuln class (no effective_for restriction). A
+                    # class-specific sanitizer (e.g. html.escape → xss only) must not
+                    # prune the path: a different downstream sink class (e.g. sqli)
+                    # can still be vulnerable, and the sink applies path_sanitizers
+                    # class-sensitively via _calc_effective_danger.
+                    if not sanitizer.effective_for and new_danger < self._danger_threshold:
                         log.debug("taint.early_termination",
                                   danger=round(new_danger, 3),
                                   threshold=self._danger_threshold)
@@ -338,7 +342,10 @@ class TaintEngine:
         code = node.code
         _, sinks, _ = self._lists_for(node.language)
         for pattern in sinks:
-            if self._pattern_matches(pattern.pattern, code):
+            if getattr(pattern, "is_regex", False):
+                if re.search(pattern.pattern, code):
+                    return pattern
+            elif self._pattern_matches(pattern.pattern, code):
                 return pattern
         return None
 

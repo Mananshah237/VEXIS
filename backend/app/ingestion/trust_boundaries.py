@@ -22,6 +22,7 @@ class SinkPattern:
     vuln_class: str
     severity: str = "high"
     description: str = ""
+    is_regex: bool = False  # match `pattern` as a regex against node code
 
 
 @dataclass
@@ -64,11 +65,12 @@ TAINT_SOURCES: list[SourcePattern] = [
 
 TAINT_SINKS: list[SinkPattern] = [
     # SQL Injection
-    SinkPattern("cursor.execute", vuln_class="sqli", severity="critical", description="Raw SQL execution"),
-    SinkPattern("cursor.executemany", vuln_class="sqli", severity="critical"),
-    SinkPattern("db.execute", vuln_class="sqli", severity="critical"),
-    SinkPattern("engine.execute", vuln_class="sqli", severity="critical"),
-    SinkPattern("session.execute", vuln_class="sqli", severity="critical"),
+    # Receiver-agnostic SQL execution: a DB cursor/connection's security semantics
+    # do not depend on its local variable name (cursor/conn/connection/db/…). Match
+    # any `<receiver>.execute(` / `.executemany(`. Parameterized-query sanitizers
+    # clear the safe cases; only tainted, unsanitized flows are reported.
+    SinkPattern(r"\.execute(many)?\s*\(", vuln_class="sqli", severity="critical",
+                description="Raw SQL execution", is_regex=True),
     SinkPattern(".raw(", vuln_class="sqli", severity="high", description="Django raw SQL"),
     SinkPattern(".extra(", vuln_class="sqli", severity="high", description="Django extra"),
 

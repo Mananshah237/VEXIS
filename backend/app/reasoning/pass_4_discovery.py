@@ -109,10 +109,21 @@ class DiscoveredFinding:
     owasp_category: str
 
 
+def _display_path(path: str, source_path: str) -> str:
+    """Repository-relative forward-slash path, never the server's temp directory."""
+    normalized = path.replace("\\", "/")
+    root = source_path.replace("\\", "/").rstrip("/")
+    if root and normalized.startswith(root + "/"):
+        return normalized[len(root) + 1:]
+    return normalized
+
+
 class BusinessLogicDiscoveryPass:
     def __init__(self, budget: LLMBudget | None = None) -> None:
         self._client = LLMClient()
         self._budget = budget
+        # not_run | skipped_no_source | budget_exhausted | failed | completed
+        self.status = "not_run"
 
     async def run(
         self,
@@ -121,27 +132,35 @@ class BusinessLogicDiscoveryPass:
     ) -> list[DiscoveredFinding]:
         """Run discovery mode on the parsed source files."""
         if not parsed_files:
+            self.status = "skipped_no_source"
             return []
 
         if self._budget and not self._budget.try_consume():
             log.warning("pass4.budget_exhausted")
+            self.status = "budget_exhausted"
             return []
 
         # Aggregate source code (truncated)
         source_chunks: list[str] = []
         total_chars = 0
+        shown_files = []  # (ParsedFile, number of source lines actually shown)
         for pf in parsed_files:
-            chunk = f"# === FILE: {pf.file_path} ===\n{pf.source}\n"
+            header = f"# === FILE: {_display_path(pf.path, source_path)} ===\n"
+            chunk = f"{header}{pf.source}\n"
             if total_chars + len(chunk) > MAX_SOURCE_CHARS:
                 remaining = MAX_SOURCE_CHARS - total_chars
                 if remaining > 500:
                     source_chunks.append(chunk[:remaining] + "\n# [truncated]\n")
+                    shown = pf.source[:max(0, remaining - len(header))]
+                    shown_files.append((pf, shown.count("\n")))
                 break
             source_chunks.append(chunk)
+            shown_files.append((pf, pf.source.count("\n") + 1))
             total_chars += len(chunk)
 
         combined_source = "".join(source_chunks)
         if not combined_source.strip():
+            self.status = "skipped_no_source"
             return []
 
         user_prompt = f"""Analyze this source code for business logic vulnerabilities.
@@ -166,47 +185,54 @@ Each finding MUST reference actual function names and line numbers from the code
             result = await self._client.analyze(SYSTEM_PROMPT, user_prompt, DISCOVERY_SCHEMA)
         except Exception as e:
             log.warning("pass4.llm_failed", error=str(e))
+            self.status = "failed"
             return []
 
-        raw_findings = result.get("findings", [])
-        validated = self._validate_and_filter(raw_findings, parsed_files)
+        raw_findings = result.get("findings") if isinstance(result, dict) else None
+        if not isinstance(raw_findings, list):
+            log.warning("pass4.malformed_response")
+            self.status = "failed"
+            return []
+        validated = self._validate_and_filter(raw_findings, shown_files, source_path)
+        self.status = "completed"
         log.info("pass4.discovery", raw=len(raw_findings), validated=len(validated))
         return validated
 
     def _validate_and_filter(
-        self, raw: list[dict], parsed_files: list
+        self, raw: list[dict], shown_files: list[tuple], source_path: str = ""
     ) -> list[DiscoveredFinding]:
-        # Build file -> max_line map
-        file_line_bounds: dict[str, int] = {}
-        file_sources: dict[str, str] = {}
-        for pf in parsed_files:
-            lines = pf.source.count("\n") + 1
-            # Normalize to just the filename for matching
-            short = pf.file_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-            file_line_bounds[short] = lines
-            file_sources[short] = pf.source
-            # Also store full path
-            file_line_bounds[pf.file_path] = lines
+        # A finding must cite a file and line that were actually shown to the model.
+        file_line_bounds: dict[str, int] = {
+            _display_path(pf.path, source_path): shown_lines
+            for pf, shown_lines in shown_files
+        }
 
         results: list[DiscoveredFinding] = []
         for item in raw:
-            confidence = float(item.get("confidence", 0))
-            if confidence < MIN_CONFIDENCE:
+            if not isinstance(item, dict):
+                continue
+            try:
+                confidence = float(item.get("confidence", 0))
+                line_ = int(item.get("line", 0))
+            except (TypeError, ValueError):
+                continue
+            if not MIN_CONFIDENCE <= confidence <= 1.0:
                 continue
 
-            file_ = item.get("file", "")
-            line_ = int(item.get("line", 0))
-
-            # Validate line is within file bounds (use short name for lookup)
-            short_file = file_.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-            max_line = file_line_bounds.get(file_) or file_line_bounds.get(short_file)
-            if max_line and line_ > max_line:
+            file_ = str(item.get("file", "")).replace("\\", "/")
+            max_line = file_line_bounds.get(file_)
+            if max_line is None:
+                log.debug("pass4.unknown_file", file=file_)
+                continue
+            if not 0 < line_ <= max_line:
                 log.debug("pass4.invalid_line", file=file_, line=line_, max=max_line)
                 continue
-            if line_ <= 0:
+            vuln_type = item.get("vuln_type")
+            if vuln_type not in CWE_MAP:
+                continue
+            if item.get("severity") not in {"low", "medium", "high", "critical"}:
                 continue
 
-            vuln_type = item.get("vuln_type", "idor")
             results.append(DiscoveredFinding(
                 vuln_type=vuln_type,
                 title=item.get("title", f"Business Logic: {vuln_type}"),

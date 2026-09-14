@@ -186,7 +186,10 @@ class CodeParser:
 
     def parse_code(self, code: str, path: str = "<string>") -> ParsedFile:
         language = self._detect_language(path)
-        parser = self._get_parser(language)
+        # TSX shares TypeScript's language identity but needs its own grammar;
+        # the plain TypeScript grammar misparses JSX elements.
+        grammar = "tsx" if Path(path).suffix.lower() == ".tsx" else language
+        parser = self._get_parser(grammar)
         encoded = code.encode("utf-8")
         tree = parser.parse(encoded)
         return ParsedFile(path=path, source=code, source_bytes=encoded, tree=tree, language=language)
